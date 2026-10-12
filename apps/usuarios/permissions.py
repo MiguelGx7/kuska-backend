@@ -49,5 +49,8 @@ class EsAdministrador(_TieneRol):
     message = "Esta acción es solo para administradores."
 
 
-# Para vistas del panel: reemplaza los permisos por defecto, así que los repite.
+# Listas para permission_classes: reemplazan las de por defecto, así que
+# repiten IsAuthenticated y EsUsuarioActivo.
 PERMISOS_ADMIN = [IsAuthenticated, EsUsuarioActivo, EsAdministrador]
+PERMISOS_DONANTE = [IsAuthenticated, EsUsuarioActivo, EsDonante]
+PERMISOS_BENEFICIARIO = [IsAuthenticated, EsUsuarioActivo, EsBeneficiario]

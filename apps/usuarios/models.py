@@ -129,6 +129,13 @@ class Usuario(AbstractBaseUser, PermissionsMixin):
         """No es columna: se calcula desde estado. Los bloqueados los maneja el login (RN-03)."""
         return self.estado != self.Estado.INACTIVO
 
+    @property
+    def nombre_para_mostrar(self):
+        """Nombre del negocio si es un donante Negocio; si no, nombres y apellidos."""
+        if self.tipo_donante == self.TipoDonante.NEGOCIO and self.nombre_negocio:
+            return self.nombre_negocio
+        return self.get_full_name()
+
     def get_full_name(self):
         return f"{self.nombres} {self.apellidos}"
 

@@ -225,5 +225,7 @@ SPECTACULAR_SETTINGS = {
     "ENUM_NAME_OVERRIDES": {
         "EstadoUsuarioEnum": "apps.usuarios.models.Usuario.Estado",
         "EstadoCambiableEnum": ["Activo", "Inactivo"],
+        "EstadoDonacionEnum": "apps.donaciones.models.Donacion.Estado",
+        "EstadoNovedadEnum": "apps.donaciones.models.Novedad.Estado",
     },
 }

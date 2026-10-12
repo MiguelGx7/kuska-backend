@@ -97,6 +97,8 @@ El detalle exacto de tipos, restricciones e índices está en `docs/kumora_bd.sq
 - En Django: `ImageField(db_column="url_foto", max_length=500)` con el almacenamiento de `django-cloudinary-storage` configurado en `STORAGES`, leyendo `CLOUDINARY_URL` del `.env`. Se guarda la ruta (`kumora/alimentos/...`) y la URL completa se arma al leerla.
 - Carpeta en Cloudinary: `kumora/alimentos/`.
 - Al eliminar un alimento o una donación `Pendiente` (RN-12) también se borra su foto en Cloudinary. Las fotos de donaciones rechazadas se conservan como evidencia para una posible sanción.
+- **Formato para crear una donación** (`POST donaciones/`): petición `multipart/form-data` con un campo `datos` (texto JSON con la donación y su lista `alimentos`) y las fotos como `foto_0`, `foto_1`... en el mismo orden de los alimentos. Así una sola petición crea todo y las fotos viajan como archivos, no en base64. Para agregar un alimento a una donación `Pendiente` (`POST donaciones/{id}/alimentos/`) se usan campos normales del multipart más `foto`.
+- **Orden para no dejar fotos huérfanas**: primero se validan todos los datos y todas las fotos (con Pillow); solo si todo está bien se sube a Cloudinary dentro de `transaction.atomic()`. Si algo falla después de subir, se borran las fotos ya subidas. Al eliminar, las fotos se borran con `transaction.on_commit()`, es decir, solo cuando la base confirmó el cambio.
 
 ### Notas de implementación en Django
 
@@ -109,6 +111,8 @@ El detalle exacto de tipos, restricciones e índices está en `docs/kumora_bd.sq
 - Los roles se buscan siempre por `nombre` ("Donante", "Beneficiario", "Administrador"), nunca por `id`.
 - "Hoy" siempre es la fecha de Bogotá: usar `timezone.localdate()` (y `timezone.localtime()` para "al final del día"). Nunca la fecha UTC, porque después de las 7 p. m. en Colombia sería el día siguiente.
 - `createsuperuser` debe asignar el rol Administrador (`rol_id` es obligatorio) y pedir nombres, apellidos, tipo y número de documento y teléfono. Por eso la migración de datos con los roles corre antes.
+
+- **Notificaciones internas**: se crean solo con `notificaciones/services.py`: `crear_notificacion(usuario, tipo, titulo, mensaje, donacion=None, solicitud=None)` y `notificar_administradores(...)` (a cada administrador `Activo`). Los servicios las llaman **dentro de su misma transacción**: si la operación falla, la notificación tampoco se guarda. Los textos largos se recortan al tamaño de la columna.
 
 **Datos iniciales** (migración de datos): los 3 roles, la fila de configuración y las categorías del script.
 
@@ -229,7 +233,7 @@ Idea: un bloqueo **temporal** no desperdicia comida ya comprometida; un bloqueo 
 | Grupo | Rutas principales |
 |---|---|
 | Auth | `auth/registro/`, `auth/login/`, `auth/refresh/`, `auth/perfil/` (ver y editar), `auth/perfil/cambiar-contrasena/`, `auth/recuperar/solicitar/`, `auth/recuperar/confirmar/` |
-| Donante | `donaciones/` (CRUD mientras Pendiente), `donaciones/{id}/alimentos/`, `donaciones/{id}/solicitudes-recibidas/`, `novedades/`, `solicitudes/{id}/entregar/`, `dashboard/donante/` |
+| Donante | `donaciones/` (CRUD mientras Pendiente), `donaciones/{id}/alimentos/` (agregar) y `donaciones/{id}/alimentos/{alimento_id}/` (quitar), `donaciones/{id}/solicitudes-recibidas/`, `novedades/`, `solicitudes/{id}/entregar/`, `dashboard/donante/` |
 | Beneficiario | `alimentos-disponibles/` (filtros: categoría, búsqueda, modalidad), `carrito/`, `carrito/enviar/`, `mis-solicitudes/` (filtro por estado), `mis-solicitudes/{id}/cancelar/` |
 | Administrador | `admin/donaciones/` (+ `validar/`, `rechazar/`), `admin/solicitudes/` (+ `aprobar/`, `rechazar/`, `entregar/`), `admin/novedades/` (+ `aceptar/`, `rechazar/`), `admin/sanciones/`, `admin/usuarios/` (+ editar correo y teléfono, `cambiar-estado/`, `impacto/`), `admin/categorias/`, `admin/configuracion/`, `dashboard/admin/` |
 | Común | `categorias/` (solo lectura, solo las activas), `notificaciones/`, `notificaciones/{id}/leer/`, `notificaciones/leer-todas/` |

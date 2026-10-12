@@ -6,6 +6,7 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", include("apps.usuarios.urls")),
     path("api/", include("apps.catalogo.urls")),
+    path("api/", include("apps.donaciones.urls")),
 ]
 
 # Swagger solo en desarrollo (DEBUG = True).
