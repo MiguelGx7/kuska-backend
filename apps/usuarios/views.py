@@ -103,15 +103,15 @@ class PerfilView(generics.RetrieveUpdateAPIView):
     def get_object(self):
         return self.request.user
 
-    @extend_schema(summary="Ver mi perfil")
+    @extend_schema(summary="Ver mi perfil", description="Datos del usuario autenticado (nunca la contraseña).")
     def get(self, request, *args, **kwargs):
         return super().get(request, *args, **kwargs)
 
-    @extend_schema(summary="Editar mi perfil (nombres, apellidos, teléfono y dirección)")
+    @extend_schema(summary="Editar mi perfil (nombres, apellidos, teléfono y dirección)", description="RN-04a: si se envía un campo no editable (correo, documento, rol...), responde 400 y no guarda nada.")
     def put(self, request, *args, **kwargs):
         return super().put(request, *args, **kwargs)
 
-    @extend_schema(summary="Editar parte de mi perfil")
+    @extend_schema(summary="Editar parte de mi perfil", description="Igual que editar, enviando solo los campos que cambian (RN-04a).")
     def patch(self, request, *args, **kwargs):
         return super().patch(request, *args, **kwargs)
 
@@ -169,9 +169,10 @@ class RecuperarConfirmarView(VistaPublicaMixin, APIView):
         summary="Listar usuarios",
         description="Filtros: rol y estado. Búsqueda (search) por nombres, apellidos, correo o documento.",
     ),
-    retrieve=extend_schema(summary="Ver un usuario"),
+    retrieve=extend_schema(summary="Ver un usuario", description="Incluye estado, bloqueado_hasta y último ingreso."),
     partial_update=extend_schema(
         summary="Corregir correo y teléfono (RN-04c)",
+        description="Solo correo y teléfono; el correo debe seguir siendo único. Cualquier otro campo responde 400.",
         request=AdminUsuarioEditarSerializer,
         responses={200: AdminUsuarioSerializer},
     ),

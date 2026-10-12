@@ -5,15 +5,18 @@ from decimal import Decimal
 from io import StringIO
 from unittest import mock
 
-from django.core.management import call_command
+from django.core.files.storage import default_storage
+from django.core.management import CommandError, call_command
 from django.db.models import F
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from apps.catalogo.models import Configuracion
 from apps.donaciones.models import Donacion, DonacionAlimento, Novedad
 from apps.donaciones.services import procesar_donaciones_desactualizadas
-from apps.donaciones.tests import BaseDonacionTest
+from apps.donaciones.tests import ALMACENAMIENTO_FALSO, BaseDonacionTest
 from apps.notificaciones.models import Notificacion
+from apps.sanciones.models import Sancion
 from apps.usuarios.models import Rol, Usuario
 from apps.usuarios.tests import cliente_de, crear_admin, crear_usuario
 
@@ -570,6 +573,15 @@ class RechazarSolicitudTests(BaseGestionTest):
         self.assertEqual(self.d2.estado, "Validada")
         self.assertIn("Ya tienes muchas", self.notificaciones("solicitud_rechazada", self.beneficiario).get().mensaje)
 
+    def test_rn50_aplica_vencimientos_antes_de_rechazar(self):
+        s = self.crear_solicitud(self.d2, [(self.panela, "1")])
+        self.vencer(self.panela, 0)  # RN-28: ya no se puede aprobar ni rechazar; se cancela sola
+        r = self.accion(s, "rechazar", {"motivo_rechazo": "x"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Cancelada", str(r.data))
+        s.refresh_from_db()
+        self.assertEqual((s.estado, s.motivo_cancelacion), ("Cancelada", MOTIVO_PENDIENTE_VENCIDA))
+
     def test_solo_pendientes(self):
         s = self.crear_solicitud(self.d2, [(self.panela, "1")], estado="Entregada")
         self.assertEqual(self.accion(s, "rechazar", {"motivo_rechazo": "x"}).status_code, 400)
@@ -1035,3 +1047,83 @@ class VencimientosAlListarTests(BaseVencimientoTest):
         self.en_carrito(self.panela, "1")
         r = self.enviar()
         self.assertEqual(r.status_code, 201, r.data)
+
+
+# =====================================================================
+# Paso 13: datos de demostración (cargar_demo)
+# =====================================================================
+@override_settings(
+    DEBUG=True,
+    STORAGES=ALMACENAMIENTO_FALSO,
+    PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"],
+)
+class CargarDemoTests(TestCase):
+    def setUp(self):
+        self.admin = crear_admin()
+        self.real = crear_usuario("real@k.com", Rol.BENEFICIARIO, "55")
+
+    def comando(self, *args):
+        salida = StringIO()
+        call_command("cargar_demo", *args, stdout=salida)
+        return salida.getvalue()
+
+    def demo(self):
+        return Usuario.objects.filter(correo__endswith="@demo.kumora")
+
+    def test_solo_con_debug(self):
+        with override_settings(DEBUG=False):
+            with self.assertRaisesMessage(CommandError, "DEBUG = True"):
+                call_command("cargar_demo", stdout=StringIO())
+        self.assertFalse(self.demo().exists())
+
+    def test_carga_todos_los_estados_sin_duplicar_y_se_puede_borrar(self):
+        salida = self.comando()
+        self.assertIn("Demo.Kumora2026", salida)
+        self.assertEqual(self.demo().count(), 5)
+        self.assertEqual(
+            set(self.demo().values_list("tipo_donante", flat=True)), {"Persona", "Negocio", None}
+        )
+        donaciones = Donacion.objects.filter(donante__in=self.demo())
+        self.assertEqual(set(donaciones.values_list("estado", flat=True)),
+                         {"Pendiente", "Validada", "Agotada", "Finalizada", "Rechazada"})
+        solicitudes = Solicitud.objects.filter(beneficiario__in=self.demo())
+        self.assertEqual(set(solicitudes.values_list("estado", flat=True)),
+                         {"Pendiente", "Aprobada", "Entregada", "No recogida", "Cancelada", "Rechazada"})
+        self.assertTrue(Novedad.objects.filter(donante__in=self.demo(), estado="Pendiente").exists())
+        self.assertTrue(Sancion.objects.filter(usuario__in=self.demo()).exists())
+        # Fechas repartidas en varios meses para el dashboard.
+        meses = {timezone.localtime(f).strftime("%Y-%m")
+                 for f in donaciones.values_list("fecha_registro", flat=True)}
+        self.assertGreaterEqual(len(meses), 3)
+        # Una foto por alimento.
+        self.assertTrue(all(DonacionAlimento.objects.filter(donacion__in=donaciones).values_list("foto", flat=True)))
+        # Datos coherentes: el comando de vencimientos no encuentra nada que cambiar.
+        vencimientos = StringIO()
+        call_command("procesar_vencimientos", stdout=vencimientos, stderr=StringIO())
+        self.assertIn("No recogida (RN-27): 0", vencimientos.getvalue())
+        self.assertIn("Finalizada (RN-16): 0", vencimientos.getvalue())
+
+        # Correrlo otra vez no duplica nada.
+        conteo = (Usuario.objects.count(), Donacion.objects.count(), Solicitud.objects.count())
+        self.assertIn("ya están cargados", self.comando())
+        self.assertEqual((Usuario.objects.count(), Donacion.objects.count(), Solicitud.objects.count()), conteo)
+
+        # --borrar quita todo lo demo (y sus fotos) sin tocar lo real.
+        fotos = list(DonacionAlimento.objects.values_list("foto", flat=True))
+        with self.captureOnCommitCallbacks(execute=True):
+            self.assertIn("eliminados", self.comando("--borrar"))
+        self.assertFalse(self.demo().exists())
+        self.assertFalse(Donacion.objects.exists())
+        self.assertFalse(Solicitud.objects.exists())
+        self.assertFalse(Notificacion.objects.exists())  # tampoco las de los administradores sobre lo demo
+        self.assertTrue(all(not default_storage.exists(f) for f in fotos))
+        self.assertTrue(Usuario.objects.filter(pk__in=[self.admin.pk, self.real.pk]).count() == 2)
+
+        # Y se puede volver a cargar.
+        self.comando()
+        self.assertEqual(self.demo().count(), 5)
+
+    def test_sin_administrador_no_carga(self):
+        Usuario.objects.filter(pk=self.admin.pk).update(estado="Inactivo")
+        with self.assertRaisesMessage(CommandError, "createsuperuser"):
+            call_command("cargar_demo", stdout=StringIO())

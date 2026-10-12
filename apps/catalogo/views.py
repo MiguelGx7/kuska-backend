@@ -12,10 +12,10 @@ from .serializers import CategoriaPublicaSerializer, CategoriaSerializer, Config
 
 @extend_schema_view(
     list=extend_schema(summary="Listar categorías", description="Filtro: activa. Búsqueda por nombre."),
-    retrieve=extend_schema(summary="Ver una categoría"),
-    create=extend_schema(summary="Crear categoría"),
-    update=extend_schema(summary="Editar categoría"),
-    partial_update=extend_schema(summary="Editar parte de una categoría"),
+    retrieve=extend_schema(summary="Ver una categoría", description="Incluye las inactivas."),
+    create=extend_schema(summary="Crear categoría", description="Nombre único (sin importar mayúsculas). Queda activa."),
+    update=extend_schema(summary="Editar categoría", description="Inactivarla (activa=false) impide usarla en alimentos nuevos; los que ya la tienen no cambian (RN-17)."),
+    partial_update=extend_schema(summary="Editar parte de una categoría", description="Igual que editar, enviando solo los campos que cambian (RN-17)."),
     destroy=extend_schema(
         summary="Eliminar categoría",
         description="Solo si ningún alimento la usa; si no, se debe inactivar (RN-17).",
@@ -58,7 +58,7 @@ class CategoriaActivaListView(generics.ListAPIView):
 class AdminConfiguracionView(APIView):
     permission_classes = PERMISOS_ADMIN
 
-    @extend_schema(summary="Ver la configuración", responses={200: ConfiguracionSerializer})
+    @extend_schema(summary="Ver la configuración", description="Fila única con los plazos y límites que usan las reglas de negocio.", responses={200: ConfiguracionSerializer})
     def get(self, request):
         return Response(ConfiguracionSerializer(services.obtener_configuracion()).data)
 

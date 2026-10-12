@@ -31,6 +31,17 @@ class NotificacionServiceTests(TestCase):
         self.assertEqual(len(n.mensaje), 500)
         self.assertTrue(n.mensaje.endswith("…"))
 
+    def test_rn40_tipos_fijos(self):
+        self.assertEqual(
+            Notificacion.Tipo.values,
+            [
+                "nueva_donacion", "donacion_validada", "donacion_rechazada", "nueva_solicitud",
+                "solicitud_aprobada", "solicitud_rechazada", "solicitud_cancelada", "alimento_cancelado",
+                "solicitud_entregada", "solicitud_no_recogida", "novedad_creada", "novedad_aceptada",
+                "novedad_rechazada", "sancion",
+            ],
+        )
+
     def test_notifica_a_cada_administrador_activo(self):
         Usuario.objects.filter(pk=self.admin2.pk).update(estado="Inactivo")
         notificar_administradores(Notificacion.Tipo.NUEVA_DONACION, "Nueva", "Mensaje")

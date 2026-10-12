@@ -2,10 +2,10 @@ from drf_spectacular.utils import extend_schema
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.usuarios.permissions import PERMISOS_ADMIN, PERMISOS_DONANTE
+from apps.usuarios.permissions import PERMISOS_ADMIN, PERMISOS_BENEFICIARIO, PERMISOS_DONANTE
 
 from . import services
-from .serializers import DashboardAdminSerializer, DashboardDonanteSerializer
+from .serializers import DashboardAdminSerializer, DashboardBeneficiarioSerializer, DashboardDonanteSerializer
 
 
 class DashboardAdminView(APIView):
@@ -40,3 +40,20 @@ class DashboardDonanteView(APIView):
     )
     def get(self, request):
         return Response(DashboardDonanteSerializer(services.dashboard_donante(request.user)).data)
+
+
+class DashboardBeneficiarioView(APIView):
+    permission_classes = PERMISOS_BENEFICIARIO
+
+    @extend_schema(
+        tags=["Dashboard"],
+        summary="Inicio del beneficiario (RN-62)",
+        description=(
+            "Solo sus datos: solicitudes Pendiente y Aprobada, cupos disponibles para enviar, su próxima "
+            "fecha límite de recogida (con código de pedido y donación) y notificaciones no leídas. "
+            "Antes aplica los vencimientos de sus solicitudes en curso (RN-50)."
+        ),
+        responses={200: DashboardBeneficiarioSerializer},
+    )
+    def get(self, request):
+        return Response(DashboardBeneficiarioSerializer(services.dashboard_beneficiario(request.user)).data)

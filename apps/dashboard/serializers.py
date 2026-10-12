@@ -62,3 +62,26 @@ class DashboardDonanteSerializer(serializers.Serializer):
     personas_ayudadas = serializers.IntegerField(help_text="Beneficiarios distintos que recibieron sus alimentos.")
     por_mes = MesDonanteSerializer(many=True, help_text="Últimos 12 meses, con los meses sin datos en 0.")
     por_categoria = CategoriaSerieSerializer(many=True, help_text="Histórico, solo categorías con alimentos donados.")
+
+
+class ProximaRecogidaSerializer(serializers.Serializer):
+    solicitud = serializers.IntegerField()
+    codigo_pedido = serializers.CharField()
+    fecha_limite_recogida = serializers.DateTimeField()
+    modalidad_entrega = serializers.CharField()
+    donacion = serializers.IntegerField()
+    donacion_titulo = serializers.CharField()
+
+
+class DashboardBeneficiarioSerializer(serializers.Serializer):
+    solicitudes_pendientes = serializers.IntegerField()
+    solicitudes_aprobadas = serializers.IntegerField()
+    max_solicitudes_activas = serializers.IntegerField(help_text="Límite de la configuración.")
+    cupos_disponibles = serializers.IntegerField(
+        help_text="max_solicitudes_activas − (Pendiente + Aprobada), mínimo 0: cuántas solicitudes más puede enviar."
+    )
+    proxima_recogida = ProximaRecogidaSerializer(
+        allow_null=True,
+        help_text="La Aprobada con la fecha límite más cercana que aún no vence; null si no tiene.",
+    )
+    notificaciones_no_leidas = serializers.IntegerField()

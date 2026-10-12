@@ -221,6 +221,11 @@ SPECTACULAR_SETTINGS = {
     "COMPONENT_SPLIT_REQUEST": True,
     # Swagger recuerda el token entre recargas de la página.
     "SWAGGER_UI_SETTINGS": {"persistAuthorization": True},
+    # Errores en español y ejemplos para todos los endpoints (ver config/openapi.py).
+    "POSTPROCESSING_HOOKS": [
+        "drf_spectacular.hooks.postprocess_schema_enums",  # el que trae por defecto
+        "config.openapi.completar_esquema",
+    ],
     # Nombres claros cuando dos campos "estado" tienen opciones distintas.
     "ENUM_NAME_OVERRIDES": {
         "EstadoUsuarioEnum": "apps.usuarios.models.Usuario.Estado",

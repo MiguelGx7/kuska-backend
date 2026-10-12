@@ -1,12 +1,15 @@
-"""Pruebas del Paso 12: dashboard (RN-60, RN-61)."""
+"""Pruebas del Paso 12: dashboard (RN-60, RN-61, RN-62)."""
 
 from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
+from rest_framework.test import APIClient
 
-from apps.donaciones.models import Donacion, DonacionAlimento
+from apps.donaciones.models import Donacion, DonacionAlimento, Novedad
+from apps.notificaciones.models import Notificacion
+from apps.notificaciones.services import crear_notificacion
 from apps.solicitudes.models import Entrega, Solicitud
 from apps.solicitudes.tests import BaseGestionTest
 from apps.usuarios.models import Rol
@@ -186,3 +189,88 @@ class DashboardDonanteTests(BaseDashboardTest):
         propia.refresh_from_db()
         ajena_vencida.refresh_from_db()
         self.assertEqual((propia.estado, ajena_vencida.estado), ("No recogida", "Aprobada"))
+
+
+# =====================================================================
+# RN-62: dashboard del beneficiario
+# =====================================================================
+class DashboardBeneficiarioTests(BaseDashboardTest):
+    def ver(self, cliente=None):
+        r = (cliente or self.cb).get("/api/dashboard/beneficiario/")
+        self.assertEqual(r.status_code, 200, r.data)
+        return r.data
+
+    def aprobada(self, donacion, alimento, horas, codigo):
+        return self.crear_solicitud(donacion, [(alimento, "1")], estado="Aprobada",
+                                    limite=timezone.now() + timedelta(hours=horas), codigo=codigo)
+
+    def test_solo_para_beneficiarios(self):
+        self.assertEqual(self.cliente.get("/api/dashboard/beneficiario/").status_code, 403)
+        self.assertEqual(self.cliente_admin.get("/api/dashboard/beneficiario/").status_code, 403)
+        self.assertEqual(APIClient().get("/api/dashboard/beneficiario/").status_code, 401)
+
+    def test_sin_solicitudes(self):
+        self.assertEqual(self.ver(), {
+            "solicitudes_pendientes": 0, "solicitudes_aprobadas": 0, "max_solicitudes_activas": 2,
+            "cupos_disponibles": 2, "proxima_recogida": None, "notificaciones_no_leidas": 0,
+        })
+
+    def test_resumen_con_la_aprobada_mas_cercana(self):
+        lejana = self.aprobada(self.d1, self.arroz, 48, "KUM-20261012-0001")
+        cercana = self.aprobada(self.d2, self.panela, 5, "KUM-20261012-0002")
+        self.crear_solicitud(self.d3, [(self.frijol, "1")], codigo="KUM-20261012-0003")  # Pendiente
+        self.crear_solicitud(self.d1, [(self.leche, "1")], estado="Entregada", codigo="KUM-20261012-0004")
+        crear_notificacion(self.beneficiario, Notificacion.Tipo.SOLICITUD_APROBADA, "a", "m")
+        leida = crear_notificacion(self.beneficiario, Notificacion.Tipo.SOLICITUD_APROBADA, "b", "m")
+        Notificacion.objects.filter(pk=leida.pk).update(leida=True)
+        crear_notificacion(self.otro_bene, Notificacion.Tipo.SOLICITUD_APROBADA, "ajena", "m")
+
+        datos = self.ver()
+        self.assertEqual((datos["solicitudes_pendientes"], datos["solicitudes_aprobadas"]), (1, 2))
+        self.assertEqual(datos["cupos_disponibles"], 0)
+        self.assertEqual(datos["notificaciones_no_leidas"], 1)
+        proxima = datos["proxima_recogida"]
+        cercana.refresh_from_db()
+        self.assertEqual(
+            (proxima["solicitud"], proxima["codigo_pedido"], proxima["donacion"], proxima["donacion_titulo"]),
+            (cercana.pk, "KUM-20261012-0002", self.d2.pk, "Mercado"),
+        )
+        self.assertNotEqual(proxima["solicitud"], lejana.pk)
+
+    def test_cupos_nunca_negativos(self):
+        # Tres en curso (por ejemplo, si el admin bajó el límite después): cupos = 0, no -1.
+        for i, (d, a) in enumerate([(self.d1, self.arroz), (self.d2, self.panela), (self.d3, self.frijol)]):
+            self.crear_solicitud(d, [(a, "1")], codigo=f"KUM-20261012-000{i}")
+        datos = self.ver()
+        self.assertEqual(datos["solicitudes_pendientes"], 3)
+        self.assertEqual(datos["cupos_disponibles"], 0)
+
+    def test_proxima_nula_si_no_tiene_aprobadas(self):
+        self.crear_solicitud(self.d1, [(self.arroz, "1")])
+        self.aprobada(self.d2, self.panela, 5, "KUM-20261012-0002")
+        Solicitud.objects.filter(estado="Aprobada").update(beneficiario=self.otro_bene)  # de otro
+        self.assertIsNone(self.ver()["proxima_recogida"])
+
+    def test_aplica_vencimientos_y_libera_el_cupo(self):
+        vencida = self.aprobada(self.d1, self.arroz, -1, "KUM-20261012-0001")
+        datos = self.ver()
+        vencida.refresh_from_db()
+        self.assertEqual(vencida.estado, "No recogida")
+        self.assertEqual((datos["solicitudes_aprobadas"], datos["cupos_disponibles"]), (0, 2))
+        self.assertIsNone(datos["proxima_recogida"])
+
+    def test_aprobada_en_revision_por_novedad_no_es_la_proxima(self):
+        # RN-31: con novedad Pendiente no pasa a No recogida aunque su límite ya pasó.
+        self.aprobada(self.d1, self.arroz, -1, "KUM-20261012-0001")
+        Novedad.objects.create(donante=self.donante, donacion=self.d1, descripcion="x")
+        datos = self.ver()
+        self.assertEqual(datos["solicitudes_aprobadas"], 1)
+        self.assertIsNone(datos["proxima_recogida"])
+
+    def test_solo_sus_datos_y_pocas_consultas(self):
+        otra = self.aprobada(self.d1, self.arroz, 5, "KUM-20261012-0001")
+        Solicitud.objects.filter(pk=otra.pk).update(beneficiario=self.otro_bene)
+        self.assertEqual(self.ver()["solicitudes_aprobadas"], 0)
+        with CaptureQueriesContext(connection) as ctx:
+            services.dashboard_beneficiario(self.beneficiario)
+        self.assertLessEqual(len(ctx), 7)

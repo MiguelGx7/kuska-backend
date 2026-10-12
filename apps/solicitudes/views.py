@@ -73,6 +73,7 @@ class CarritoItemView(APIView):
     @extend_schema(
         tags=TAG_CARRITO,
         summary="Cambiar la cantidad de un ítem",
+        description="Revalida RN-20: alimento visible, tope por solicitud y cantidad disponible. No reserva.",
         request=CarritoCantidadSerializer,
         responses={200: CarritoItemSerializer},
     )
@@ -82,7 +83,7 @@ class CarritoItemView(APIView):
         item = services.cambiar_cantidad(request.user, pk, serializer.validated_data["cantidad"])
         return Response(CarritoItemSerializer(item).data)
 
-    @extend_schema(tags=TAG_CARRITO, summary="Quitar un ítem del carrito", responses={204: None})
+    @extend_schema(tags=TAG_CARRITO, summary="Quitar un ítem del carrito", description="Solo ítems del propio carrito; uno ajeno responde 404.", responses={204: None})
     def delete(self, request, pk):
         services.quitar_del_carrito(request.user, pk)
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -116,7 +117,7 @@ class EnviarCarritoView(APIView):
 
 @extend_schema_view(
     list=extend_schema(summary="Mis solicitudes", description="Filtro: estado. Búsqueda por código de pedido. Antes de listar aplica los vencimientos (RN-50) a los registros que estén vencidos."),
-    retrieve=extend_schema(summary="Ver una de mis solicitudes"),
+    retrieve=extend_schema(summary="Ver una de mis solicitudes", description="Datos de contacto del donante solo desde Aprobada (RN-29). Una ajena responde 404."),
 )
 @extend_schema(tags=["Beneficiario - Solicitudes"])
 class MisSolicitudesViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
@@ -164,7 +165,7 @@ class MisSolicitudesViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vi
             " Antes de listar aplica los vencimientos (RN-50) a los registros que estén vencidos."
         ),
     ),
-    retrieve=extend_schema(summary="Ver una solicitud"),
+    retrieve=extend_schema(summary="Ver una solicitud", description="Con sus detalles, el beneficiario, quién la gestionó y la entrega si existe."),
 )
 @extend_schema(tags=["Admin - Solicitudes"])
 class AdminSolicitudViewSet(viewsets.ReadOnlyModelViewSet):

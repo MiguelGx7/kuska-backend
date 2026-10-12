@@ -64,7 +64,7 @@ def _fotos_de(request):
 # ---------------------------------------------------------------------
 @extend_schema_view(
     list=extend_schema(summary="Mis donaciones", description="Filtro: estado. Antes de listar aplica los vencimientos (RN-50) a los registros que estén vencidos."),
-    retrieve=extend_schema(summary="Ver una de mis donaciones"),
+    retrieve=extend_schema(summary="Ver una de mis donaciones", description="Con sus alimentos y fotos. Una donación ajena responde 404."),
     destroy=extend_schema(
         summary="Eliminar mi donación (solo Pendiente)",
         description="También borra las fotos en Cloudinary.",
@@ -139,6 +139,7 @@ class DonacionDonanteViewSet(
 
     @extend_schema(
         summary="Agregar un alimento (solo Pendiente)",
+        description="Multipart con los campos del alimento y su foto (RN-11a). Valida categoría activa, vencimiento y enteros (RN-10a, RN-11, RN-17).",
         request={"multipart/form-data": AlimentoNuevoSerializer},
         responses={201: AlimentoSerializer},
     )
@@ -190,7 +191,7 @@ class DonacionDonanteViewSet(
         summary="Listar donaciones",
         description="Filtros: estado y donante (id). Búsqueda por título o correo del donante. Antes de listar aplica los vencimientos (RN-50) a los registros que estén vencidos.",
     ),
-    retrieve=extend_schema(summary="Ver una donación con sus fotos"),
+    retrieve=extend_schema(summary="Ver una donación con sus fotos", description="El administrador usa las fotos para validar que es comida en buen estado (RN-11a, RN-13)."),
 )
 @extend_schema(tags=["Admin - Donaciones"])
 class AdminDonacionViewSet(viewsets.ReadOnlyModelViewSet):
@@ -275,7 +276,7 @@ def _novedades():
 
 @extend_schema_view(
     list=extend_schema(summary="Mis novedades", description="Filtros: estado y donacion (id)."),
-    retrieve=extend_schema(summary="Ver una de mis novedades"),
+    retrieve=extend_schema(summary="Ver una de mis novedades", description="Incluye su estado y la respuesta del administrador. Una ajena responde 404."),
 )
 @extend_schema(tags=["Donante - Novedades"])
 class NovedadDonanteViewSet(

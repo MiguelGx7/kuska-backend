@@ -112,6 +112,13 @@ class RegistroTests(BaseAPITest):
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.data["rol"], ["Solo puedes registrarte como Donante o Beneficiario."])
 
+    def test_rn01_el_administrador_se_crea_por_consola_con_su_rol(self):
+        # createsuperuser usa create_superuser: asigna el rol Administrador (rol_id es obligatorio).
+        admin = crear_admin("consola@mail.com", "77")
+        self.assertEqual(admin.rol.nombre, Rol.ADMINISTRADOR)
+        self.assertTrue(admin.is_superuser and admin.is_staff)
+        self.assertEqual(admin.estado, "Activo")
+
     def test_negocio_exige_nombre_y_nit(self):
         r = self.registrar(correo="y@mail.com", rol="Donante", numero_documento="4", tipo_donante="Negocio")
         self.assertEqual(r.status_code, 400)
@@ -576,3 +583,23 @@ class CambiarEstadoTests(BaseAPITest):
         self.beneficiario.refresh_from_db()
         self.assertEqual(self.beneficiario.estado, "Bloqueado")
         self.assertIsNone(self.beneficiario.bloqueado_hasta)
+
+
+# =====================================================================
+# Paso 13: contrato de la API (Swagger)
+# =====================================================================
+class ContratoApiTests(TestCase):
+    def test_todos_los_endpoints_tienen_descripcion_y_errores(self):
+        from drf_spectacular.generators import SchemaGenerator
+
+        esquema = SchemaGenerator().get_schema(request=None, public=True)
+        faltan = [
+            f"{metodo.upper()} {ruta}"
+            for ruta, operaciones in esquema["paths"].items()
+            for metodo, operacion in operaciones.items()
+            if not operacion.get("description") or not any(c.startswith("4") for c in operacion["responses"])
+        ]
+        self.assertEqual(faltan, [])
+        login = esquema["paths"]["/api/auth/login/"]["post"]
+        self.assertEqual(set(login["responses"]), {"200", "400", "401", "403", "429"})
+        self.assertIn("examples", login["requestBody"]["content"]["application/json"])

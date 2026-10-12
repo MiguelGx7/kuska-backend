@@ -15,7 +15,7 @@ from .serializers import AdminSancionSerializer, CrearSancionSerializer, Sancion
         summary="Listar sanciones",
         description="Filtros: usuario (id), tipo y vigente. Búsqueda (search) por motivo o correo.",
     ),
-    retrieve=extend_schema(summary="Ver una sanción"),
+    retrieve=extend_schema(summary="Ver una sanción", description="Con el usuario sancionado, quién la creó, fechas y si sigue vigente."),
     create=extend_schema(
         summary="Sancionar a un usuario (RN-05 a RN-08, RN-70 a RN-73)",
         description=(

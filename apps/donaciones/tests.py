@@ -362,6 +362,15 @@ class AdminDonacionTests(BaseDonacionTest):
     def test_solo_administradores(self):
         self.assertEqual(self.cliente.get("/api/admin/donaciones/").status_code, 403)
 
+    def test_rn12_el_administrador_no_edita_ni_borra_donaciones(self):
+        d = self.crear_en_bd()
+        url = f"/api/admin/donaciones/{d.pk}/"
+        self.assertEqual(self.cliente_admin.patch(url, {"titulo": "Otro"}, format="json").status_code, 405)
+        self.assertEqual(self.cliente_admin.put(url, {"titulo": "Otro"}, format="json").status_code, 405)
+        self.assertEqual(self.cliente_admin.delete(url).status_code, 405)
+        d.refresh_from_db()
+        self.assertEqual(d.titulo, "Mercado")
+
     def test_listar_con_filtros_y_detalle_con_fotos(self):
         d = self.crear_en_bd()
         self.crear_en_bd(donante=self.otro_donante, estado="Validada")

@@ -1,5 +1,5 @@
 """
-Estadísticas del dashboard (RN-60 administrador, RN-61 donante).
+Estadísticas del dashboard (RN-60 administrador, RN-61 donante, RN-62 beneficiario).
 
 Sin modelos propios: todo sale de agregaciones en la base (Count, Sum,
 annotate). Las series cuentan registros; nunca suman cantidades de
@@ -12,9 +12,10 @@ from django.db.models import Count, Q, Sum
 from django.db.models.functions import TruncMonth
 from django.utils import timezone
 
-from apps.catalogo.models import Categoria
+from apps.catalogo.models import Categoria, Configuracion
 from apps.donaciones.models import Donacion, DonacionAlimento
 from apps.donaciones.services import procesar_donaciones_desactualizadas
+from apps.notificaciones.services import contar_no_leidas
 from apps.solicitudes.models import DetalleSolicitud, Entrega, Solicitud
 from apps.solicitudes.services import procesar_solicitudes_vencidas
 
@@ -194,4 +195,42 @@ def dashboard_donante(donante):
             alimentos_entregados=_por_mes(detalles, "solicitud__entrega__fecha_entrega", inicio),
         ),
         "por_categoria": _por_categoria({"donante": donante}),
+    }
+
+
+# ---------------------------------------------------------------------
+# Beneficiario (RN-62): resumen para su pantalla de inicio
+# ---------------------------------------------------------------------
+def dashboard_beneficiario(beneficiario):
+    # RN-50: solo sus solicitudes en curso que de verdad estén vencidas.
+    en_curso = Solicitud.objects.filter(beneficiario=beneficiario, estado__in=Solicitud.ESTADOS_EN_CURSO)
+    procesar_solicitudes_vencidas(en_curso)
+
+    conteo = en_curso.aggregate(
+        pendientes=Count("id", filter=Q(estado=Solicitud.Estado.PENDIENTE)),
+        aprobadas=Count("id", filter=Q(estado=Solicitud.Estado.APROBADA)),
+    )
+    maximo = Configuracion.objects.get(pk=1).max_solicitudes_activas
+    # La más cercana que aún no vence. Una Aprobada con el límite ya pasado solo
+    # existe si tiene una novedad Pendiente (RN-31): su fecha se recalculará.
+    proxima = (
+        en_curso.filter(estado=Solicitud.Estado.APROBADA, fecha_limite_recogida__gte=timezone.now())
+        .select_related("donacion")
+        .order_by("fecha_limite_recogida", "id")
+        .first()
+    )
+    return {
+        "solicitudes_pendientes": conteo["pendientes"],
+        "solicitudes_aprobadas": conteo["aprobadas"],
+        "max_solicitudes_activas": maximo,
+        "cupos_disponibles": max(maximo - conteo["pendientes"] - conteo["aprobadas"], 0),
+        "proxima_recogida": proxima and {
+            "solicitud": proxima.pk,
+            "codigo_pedido": proxima.codigo_pedido,
+            "fecha_limite_recogida": proxima.fecha_limite_recogida,
+            "modalidad_entrega": proxima.modalidad_entrega,
+            "donacion": proxima.donacion_id,
+            "donacion_titulo": proxima.donacion.titulo,
+        },
+        "notificaciones_no_leidas": contar_no_leidas(beneficiario),
     }

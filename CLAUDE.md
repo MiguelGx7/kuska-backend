@@ -213,6 +213,7 @@ Idea: un bloqueo **temporal** no desperdicia comida ya comprometida; un bloqueo 
 ### Dashboard
 - **RN-60** Administrador: donaciones recibidas (validadas en adelante), solicitudes entregadas, solicitudes pendientes, personas beneficiadas (beneficiarios distintos con al menos una entrega), y series por mes y por categoría. Las series **cuentan** donaciones, solicitudes, entregas y alimentos; no suman cantidades (las unidades son distintas).
 - **RN-61** Donante: sus donaciones por estado, número de entregas y de alimentos entregados, cantidades entregadas **agrupadas por `unidad_medida`** (no se suman unidades distintas), personas a las que ha ayudado, y series por mes y por categoría.
+- **RN-62** Beneficiario: resumen para su pantalla de inicio: solicitudes `Pendiente` y `Aprobada`, cupos disponibles (`max_solicitudes_activas` − activas, mínimo 0), su próxima `fecha_limite_recogida` (de la `Aprobada` más cercana, con su `codigo_pedido` y donación) y notificaciones no leídas.
 
 ---
 
@@ -235,7 +236,7 @@ Idea: un bloqueo **temporal** no desperdicia comida ya comprometida; un bloqueo 
 |---|---|
 | Auth | `auth/registro/`, `auth/login/`, `auth/refresh/`, `auth/perfil/` (ver y editar), `auth/perfil/cambiar-contrasena/`, `auth/recuperar/solicitar/`, `auth/recuperar/confirmar/` |
 | Donante | `donaciones/` (CRUD mientras Pendiente), `donaciones/{id}/alimentos/` (agregar) y `donaciones/{id}/alimentos/{alimento_id}/` (quitar), `donaciones/{id}/solicitudes-recibidas/`, `novedades/`, `solicitudes/{id}/entregar/`, `dashboard/donante/` |
-| Beneficiario | `alimentos-disponibles/` (filtros: categoría, búsqueda, modalidad), `carrito/`, `carrito/enviar/`, `mis-solicitudes/` (filtro por estado), `mis-solicitudes/{id}/cancelar/` |
+| Beneficiario | `alimentos-disponibles/` (filtros: categoría, búsqueda, modalidad), `carrito/`, `carrito/enviar/`, `mis-solicitudes/` (filtro por estado), `mis-solicitudes/{id}/cancelar/`, `dashboard/beneficiario/` |
 | Administrador | `admin/donaciones/` (+ `validar/`, `rechazar/`), `admin/solicitudes/` (+ `aprobar/`, `rechazar/`, `entregar/`), `admin/novedades/` (+ `aceptar/`, `rechazar/`), `admin/sanciones/`, `admin/usuarios/` (+ editar correo y teléfono, `cambiar-estado/`, `impacto/`), `admin/categorias/`, `admin/configuracion/`, `dashboard/admin/` |
 | Común | `categorias/` (solo lectura, solo las activas), `notificaciones/`, `notificaciones/{id}/leer/`, `notificaciones/leer-todas/` |
 | Docs | `api/docs/` (Swagger): solo disponible con `DEBUG = True` |
@@ -257,5 +258,5 @@ Listados con paginación y filtros (`django-filter`).
 9. **Sanciones y bloqueos** (RN-03 a RN-08, RN-70 a RN-77). Incluye los efectos en cascada de RN-71/RN-73 al inactivar (el endpoint `admin/usuarios/{id}/cambiar-estado/` ya existe desde el Paso 4 y tiene un `# TODO Paso 9` en `usuarios/services.py`) y el endpoint `admin/usuarios/{id}/impacto/` (RN-74).
 10. **Notificaciones** (RN-40, RN-41).
 11. **Vencimientos** (RN-50).
-12. **Dashboard** (RN-60, RN-61).
+12. **Dashboard** (RN-60, RN-61, RN-62).
 13. **Pruebas y documentación** (tests de las reglas clave y Swagger).

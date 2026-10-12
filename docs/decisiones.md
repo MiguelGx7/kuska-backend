@@ -184,3 +184,75 @@ En los dos casos el resumen y los errores quedan en `logs/vencimientos.log`. Si 
 - **Por categoría: histórico y solo las que tienen datos.** Una sola consulta da por categoría los alimentos donados (en donaciones recibidas) y los entregados. Se omiten las categorías sin alimentos donados, para no llenar la gráfica de ceros. Van de la que tiene más alimentos donados a la que menos.
 - **Datos al día.** Antes de calcular se aplican los vencimientos pendientes con las mismas funciones eficientes del Paso 11: todo para el administrador y solo lo suyo para el donante. Si nada está vencido, eso cuesta 4 consultas.
 - **Solo sus datos.** `dashboard/donante/` filtra todo por el donante del token. `dashboard/admin/` es solo para administradores. Cada rol recibe 403 en el dashboard del otro.
+- **RN-62, inicio del beneficiario (`dashboard/beneficiario/`, agregado durante el Paso 13).** Es un resumen para la pantalla de inicio de la app, no estadísticas. Trae:
+  - las solicitudes `Pendiente` y `Aprobada`;
+  - los cupos disponibles, que son `max_solicitudes_activas` − (Pendiente + Aprobada) con **mínimo 0**: si el administrador baja el límite cuando el beneficiario ya tiene más solicitudes en curso, se muestra 0 y no un número negativo;
+  - la **próxima recogida**: la `Aprobada` con la fecha límite más cercana que **aún no vence**, con su código de pedido, modalidad y donación. Una `Aprobada` con el límite ya pasado solo puede existir si tiene una novedad `Pendiente` (RN-31); su fecha se recalculará, así que no se muestra como "próxima". Si no tiene ninguna, el campo es `null`;
+  - las notificaciones no leídas, contadas con la misma función de `notificaciones/`.
+
+  Antes de calcular se aplican los vencimientos de sus solicitudes en curso con la función eficiente del Paso 11: una `Aprobada` vencida pasa a `No recogida` y libera el cupo. Hace unas 6 consultas (dos de vencimientos, una agregación con dos `Count` filtrados, la configuración, la próxima recogida y las no leídas), siempre las mismas.
+
+## Paso 13 — Pruebas y documentación
+
+- **Cobertura por regla.** [docs/cobertura_pruebas.md](cobertura_pruebas.md) relaciona cada RN con sus pruebas. Al armarla aparecieron cuatro partes de reglas sin prueba propia, y se agregaron:
+  - RN-01: `createsuperuser` asigna el rol Administrador.
+  - RN-12: el administrador no puede editar ni borrar donaciones (405).
+  - RN-40: los 14 tipos de notificación son exactamente los de la regla.
+  - RN-50: los vencimientos también se aplican antes de rechazar una solicitud.
+- **`cargar_demo` usa los servicios reales.** Registra con `RegistroSerializer` + `registrar_usuario()`, crea donaciones con `crear_donacion()`, valida, pide con el carrito y aprueba, entrega, sanciona y reporta novedades con las mismas funciones de la API. Así los datos cumplen todas las reglas (topes, reservas, estados, notificaciones). Si una regla cambia, la demo falla en lugar de quedar con datos imposibles.
+- **Se planeó para respetar los límites.** Por ejemplo:
+  - Para la donación `Agotada` se usan 3 unidades de leche; con el 30 % el tope por solicitud es 1, así que los 3 beneficiarios la agotan.
+  - Para la `Finalizada` se usan 2 paquetes de pan, ambos entregados.
+  - Ningún beneficiario pasa de 2 solicitudes en curso.
+  - La `No recogida` se logra aprobando la solicitud, adelantando su fecha límite y aplicando RN-27 con `aplicar_vencimientos()`.
+- **Fechas en el pasado después de crear.** `fecha_registro`, `fecha_solicitud` y `fecha_entrega` usan `auto_now_add`, así que se mueven con `update()` al final. Solo se mueven registros ya terminados; las solicitudes en curso conservan fechas actuales, para que `procesar_vencimientos` no las cambie. Una prueba lo comprueba: después de cargar la demo, el comando no encuentra nada que cambiar.
+- **Códigos de pedido coherentes con la nueva fecha.** Al mover una solicitud, su código pasa a `KUM-<nuevo día>-9NNN`. El 9 evita chocar con códigos reales de ese día. También se corrige el código en las notificaciones que lo mencionan.
+- **No duplica.** Si ya hay usuarios `@demo.kumora`, avisa y no crea nada. Para recargar: `--borrar` y luego cargar.
+- **Todo o nada.** La carga va en una transacción. Si algo falla, la base se deshace y las fotos ya subidas a Cloudinary se borran a mano, porque Cloudinary no participa en la transacción.
+- **`--borrar` limpio.** Elimina, en un orden que respeta los `PROTECT`:
+  - las notificaciones de los usuarios demo y las de los administradores sobre la demo (por donación, solicitud o código de pedido);
+  - las sanciones;
+  - las entregas, solicitudes, carritos, novedades y donaciones;
+  - y por último los usuarios.
+  Las fotos se borran de Cloudinary con `on_commit`, solo si la base confirmó. Los datos reales no se tocan, y hay una prueba que lo verifica.
+- **Solo con `DEBUG=True`**, para que nunca se cargue en producción. Usa el Administrador existente (el primero activo) y no le cambia la contraseña.
+- **Contrato de la API.** [docs/api_schema.yaml](api_schema.yaml) se exporta con `spectacular` y valida sin advertencias.
+  - Las 19 operaciones que no tenían descripción ya la tienen.
+  - Un *hook* de drf-spectacular ([config/openapi.py](../config/openapi.py)) agrega a todos los endpoints sus respuestas de error en español, con ejemplos:
+    - 400 en las que reciben datos o parámetros obligatorios;
+    - 401 y 403 en las protegidas (y en el login);
+    - 404 en las que llevan `{id}`;
+    - 429 en las que tienen límite de peticiones.
+  - El mismo hook agrega ejemplos de petición a los endpoints principales.
+  - Estar en un solo lugar evita repetirlo en cada vista y mantiene el contrato uniforme. Una prueba (`ContratoApiTests`) falla si un endpoint nuevo queda sin descripción o sin errores.
+- **Los mensajes de los ejemplos son los reales.** Los de DRF salen en español por `LANGUAGE_CODE = "es-co"`; por ejemplo, "Las credenciales de autenticación no se proveyeron."
+
+### Revisión de producción (`check --deploy`)
+
+No se cambió la configuración de desarrollo. Estas son las advertencias y lo que haría falta en un despliegue real:
+
+| Advertencia | Qué significa | Qué hacer en producción |
+|---|---|---|
+| `security.W018` DEBUG en True | Con DEBUG se ven trazas con detalles internos, y Swagger y `cargar_demo` quedan disponibles. | `DEBUG=False` en el `.env` del servidor. |
+| `security.W008` SECURE_SSL_REDIRECT | Las peticiones por HTTP no se redirigen a HTTPS, y los tokens viajarían sin cifrar. | `SECURE_SSL_REDIRECT=True`, o que el proxy (Nginx, IIS, el servicio de hosting) redirija; en ese caso también `SECURE_PROXY_SSL_HEADER`. |
+| `security.W004` SECURE_HSTS_SECONDS | El navegador no recuerda que el sitio solo funciona por HTTPS. | Activar HSTS cuando HTTPS ya funcione bien: empezar con un valor bajo (3600) y subirlo a un año. Es difícil de revertir, por eso se hace al final. |
+| `security.W012` SESSION_COOKIE_SECURE | La cookie de sesión (solo la usa el admin de Django) podría viajar por HTTP. | `SESSION_COOKIE_SECURE=True`. |
+| `security.W016` CSRF_COOKIE_SECURE | Lo mismo con la cookie CSRF del admin de Django. | `CSRF_COOKIE_SECURE=True`. |
+
+Además de esas advertencias, un despliegue real necesita:
+- Un `SECRET_KEY` nuevo, solo del servidor.
+- `ALLOWED_HOSTS` y `CORS_ALLOWED_ORIGINS` con el dominio real.
+- Servir la API con un servidor de producción (Gunicorn en Linux o Waitress en Windows) en lugar de `runserver`, y `collectstatic` para el admin.
+- `procesar_vencimientos` programado cada hora.
+- Un plan de Aiven que no se apague por inactividad.
+- Correo SMTP real.
+
+La forma recomendada sería leer esas opciones del `.env` dentro de un bloque `if not DEBUG:` en `settings.py`, así el mismo código sirve para los dos entornos. No se hizo ahora para no tocar la configuración de desarrollo.
+
+### Evidencia de la suite final
+
+- **Suite completa sin `--keepdb`:** creó la base de pruebas desde cero y corrió 301 pruebas en 6015 s (unos 100 min, por la latencia con Aiven ese día). Pasaron 298.
+- **Los 3 errores** fueron dos cortes de conexión del servidor (`2013 Lost connection to server during query`); el tercero heredó la transacción rota del segundo. No son fallos del código.
+- **Comprobación:** esas 3 pruebas se volvieron a correr solas, también sin `--keepdb`, y pasaron.
+- **Corridas anteriores:** en las dos corridas completas previas del mismo día hubo cortes iguales, siempre en pruebas distintas. Todas las demás pasaron.
+- **Para una evidencia sin cortes:** correr la suite desde una red estable o contra un MySQL local.
