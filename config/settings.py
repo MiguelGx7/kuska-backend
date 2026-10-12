@@ -221,4 +221,9 @@ SPECTACULAR_SETTINGS = {
     "COMPONENT_SPLIT_REQUEST": True,
     # Swagger recuerda el token entre recargas de la página.
     "SWAGGER_UI_SETTINGS": {"persistAuthorization": True},
+    # Nombres claros cuando dos campos "estado" tienen opciones distintas.
+    "ENUM_NAME_OVERRIDES": {
+        "EstadoUsuarioEnum": "apps.usuarios.models.Usuario.Estado",
+        "EstadoCambiableEnum": ["Activo", "Inactivo"],
+    },
 }

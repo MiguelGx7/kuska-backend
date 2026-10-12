@@ -1,4 +1,4 @@
-from rest_framework.permissions import BasePermission
+from rest_framework.permissions import BasePermission, IsAuthenticated
 
 from . import services
 from .models import Rol
@@ -47,3 +47,7 @@ class EsBeneficiario(_TieneRol):
 class EsAdministrador(_TieneRol):
     rol = Rol.ADMINISTRADOR
     message = "Esta acción es solo para administradores."
+
+
+# Para vistas del panel: reemplaza los permisos por defecto, así que los repite.
+PERMISOS_ADMIN = [IsAuthenticated, EsUsuarioActivo, EsAdministrador]

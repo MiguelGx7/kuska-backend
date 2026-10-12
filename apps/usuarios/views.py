@@ -1,12 +1,19 @@
-from drf_spectacular.utils import extend_schema
-from rest_framework import generics, status
+from drf_spectacular.utils import extend_schema, extend_schema_view
+from rest_framework import generics, mixins, status, viewsets
+from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenRefreshView
 
 from . import services
+from .filters import UsuarioFilter
+from .models import Usuario
+from .permissions import PERMISOS_ADMIN
 from .serializers import (
+    AdminUsuarioEditarSerializer,
+    AdminUsuarioSerializer,
+    CambiarEstadoSerializer,
     CambiarContrasenaSerializer,
     LoginRespuestaSerializer,
     LoginSerializer,
@@ -149,3 +156,62 @@ class RecuperarConfirmarView(VistaPublicaMixin, APIView):
         serializer.is_valid(raise_exception=True)
         services.confirmar_recuperacion(**serializer.validated_data)
         return Response({"mensaje": "Contraseña actualizada. Ya puedes iniciar sesión."})
+
+
+# ---------------------------------------------------------------------
+# Administración de usuarios (panel web)
+# ---------------------------------------------------------------------
+@extend_schema_view(
+    list=extend_schema(
+        summary="Listar usuarios",
+        description="Filtros: rol y estado. Búsqueda (search) por nombres, apellidos, correo o documento.",
+    ),
+    retrieve=extend_schema(summary="Ver un usuario"),
+    partial_update=extend_schema(
+        summary="Corregir correo y teléfono (RN-04c)",
+        request=AdminUsuarioEditarSerializer,
+        responses={200: AdminUsuarioSerializer},
+    ),
+)
+@extend_schema(tags=["Admin - Usuarios"])
+class AdminUsuarioViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    viewsets.GenericViewSet,
+):
+    permission_classes = PERMISOS_ADMIN
+    queryset = Usuario.objects.select_related("rol").order_by("-fecha_registro")
+    filterset_class = UsuarioFilter
+    search_fields = ["nombres", "apellidos", "correo", "numero_documento"]
+    ordering_fields = ["fecha_registro", "nombres", "apellidos", "correo"]
+    http_method_names = ["get", "patch", "post", "head", "options"]
+
+    def get_serializer_class(self):
+        if self.action == "partial_update":
+            return AdminUsuarioEditarSerializer
+        return AdminUsuarioSerializer
+
+    def partial_update(self, request, *args, **kwargs):
+        usuario = self.get_object()
+        serializer = AdminUsuarioEditarSerializer(usuario, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        usuario = serializer.save()
+        return Response(AdminUsuarioSerializer(usuario).data)
+
+    @extend_schema(
+        summary="Cambiar estado entre Activo e Inactivo (RN-04, RN-75)",
+        description=(
+            "No aplica a administradores ni a uno mismo. Inactivar cierra todas sus sesiones. "
+            "Reactivar devuelve a Activo, o a Bloqueado si aún tiene un bloqueo vigente."
+        ),
+        request=CambiarEstadoSerializer,
+        responses={200: AdminUsuarioSerializer},
+    )
+    @action(detail=True, methods=["post"], url_path="cambiar-estado")
+    def cambiar_estado(self, request, pk=None):
+        usuario = self.get_object()
+        serializer = CambiarEstadoSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        usuario = services.cambiar_estado(request.user, usuario.pk, serializer.validated_data["estado"])
+        return Response(AdminUsuarioSerializer(usuario).data)

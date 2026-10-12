@@ -232,7 +232,7 @@ Idea: un bloqueo **temporal** no desperdicia comida ya comprometida; un bloqueo 
 | Donante | `donaciones/` (CRUD mientras Pendiente), `donaciones/{id}/alimentos/`, `donaciones/{id}/solicitudes-recibidas/`, `novedades/`, `solicitudes/{id}/entregar/`, `dashboard/donante/` |
 | Beneficiario | `alimentos-disponibles/` (filtros: categoría, búsqueda, modalidad), `carrito/`, `carrito/enviar/`, `mis-solicitudes/` (filtro por estado), `mis-solicitudes/{id}/cancelar/` |
 | Administrador | `admin/donaciones/` (+ `validar/`, `rechazar/`), `admin/solicitudes/` (+ `aprobar/`, `rechazar/`, `entregar/`), `admin/novedades/` (+ `aceptar/`, `rechazar/`), `admin/sanciones/`, `admin/usuarios/` (+ editar correo y teléfono, `cambiar-estado/`, `impacto/`), `admin/categorias/`, `admin/configuracion/`, `dashboard/admin/` |
-| Común | `notificaciones/`, `notificaciones/{id}/leer/`, `notificaciones/leer-todas/` |
+| Común | `categorias/` (solo lectura, solo las activas), `notificaciones/`, `notificaciones/{id}/leer/`, `notificaciones/leer-todas/` |
 | Docs | `api/docs/` (Swagger): solo disponible con `DEBUG = True` |
 
 Listados con paginación y filtros (`django-filter`).
@@ -249,7 +249,7 @@ Listados con paginación y filtros (`django-filter`).
 6. **Carrito y envío de solicitudes** (RN-20 a RN-23).
 7. **Gestión de solicitudes y entregas** (RN-24 a RN-28, RN-15, RN-16).
 8. **Novedades** (RN-30 a RN-33).
-9. **Sanciones y bloqueos** (RN-03 a RN-08, RN-70 a RN-77).
+9. **Sanciones y bloqueos** (RN-03 a RN-08, RN-70 a RN-77). Incluye los efectos en cascada de RN-71/RN-73 al inactivar (el endpoint `admin/usuarios/{id}/cambiar-estado/` ya existe desde el Paso 4 y tiene un `# TODO Paso 9` en `usuarios/services.py`) y el endpoint `admin/usuarios/{id}/impacto/` (RN-74).
 10. **Notificaciones** (RN-40, RN-41).
 11. **Vencimientos** (RN-50).
 12. **Dashboard** (RN-60, RN-61).

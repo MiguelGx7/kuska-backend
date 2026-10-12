@@ -4,7 +4,8 @@ from django.urls import include, path
 
 urlpatterns = [
     path("admin/", admin.site.urls),
-    path("api/auth/", include("apps.usuarios.urls")),
+    path("api/", include("apps.usuarios.urls")),
+    path("api/", include("apps.catalogo.urls")),
 ]
 
 # Swagger solo en desarrollo (DEBUG = True).

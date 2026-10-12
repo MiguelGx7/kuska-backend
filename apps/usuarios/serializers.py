@@ -118,23 +118,30 @@ class RefreshRespuestaSerializer(serializers.Serializer):
 # ---------------------------------------------------------------------
 # Perfil
 # ---------------------------------------------------------------------
-class PerfilSerializer(UsuarioSerializer):
+class RechazarNoEditablesMixin:
+    """Si llega un dato de solo lectura, responde 400 en vez de ignorarlo."""
+
+    mensaje_no_editable = "Este dato no se puede editar."
+
+    def validate(self, attrs):
+        no_editables = sorted(set(self.initial_data) & set(self.Meta.read_only_fields))
+        if no_editables:
+            raise serializers.ValidationError(
+                {campo: [self.mensaje_no_editable] for campo in no_editables}
+            )
+        return super().validate(attrs)
+
+
+class PerfilSerializer(RechazarNoEditablesMixin, UsuarioSerializer):
     """Solo se editan nombres, apellidos, teléfono y dirección (RN-04a)."""
+
+    mensaje_no_editable = "Este dato no se puede editar desde el perfil."
 
     class Meta(UsuarioSerializer.Meta):
         read_only_fields = tuple(
             f for f in UsuarioSerializer.Meta.fields if f not in services.CAMPOS_PERFIL
         )
         extra_kwargs = {"direccion": {"allow_blank": True}}
-
-    def validate(self, attrs):
-        # Si llega un dato que no se edita aquí, se avisa en vez de ignorarlo.
-        no_editables = sorted(set(self.initial_data) & set(self.Meta.read_only_fields))
-        if no_editables:
-            raise serializers.ValidationError(
-                {campo: ["Este dato no se puede editar desde el perfil."] for campo in no_editables}
-            )
-        return attrs
 
     def update(self, instance, validated_data):
         return services.actualizar_perfil(instance, validated_data)
@@ -162,3 +169,35 @@ class RecuperarConfirmarSerializer(serializers.Serializer):
 
 class MensajeSerializer(serializers.Serializer):
     mensaje = serializers.CharField()
+
+
+# ---------------------------------------------------------------------
+# Administración de usuarios
+# ---------------------------------------------------------------------
+class AdminUsuarioSerializer(UsuarioSerializer):
+    class Meta(UsuarioSerializer.Meta):
+        fields = (*UsuarioSerializer.Meta.fields, "bloqueado_hasta", "last_login", "fecha_actualizacion")
+        read_only_fields = fields
+
+
+class AdminUsuarioEditarSerializer(RechazarNoEditablesMixin, AdminUsuarioSerializer):
+    """El administrador solo corrige correo y teléfono (RN-04c)."""
+
+    mensaje_no_editable = "El administrador solo puede corregir el correo y el teléfono."
+
+    class Meta(AdminUsuarioSerializer.Meta):
+        read_only_fields = tuple(
+            f for f in AdminUsuarioSerializer.Meta.fields if f not in ("correo", "telefono")
+        )
+        # La unicidad la valida el servicio, con mensaje en español.
+        extra_kwargs = {"correo": {"validators": []}}
+
+    def update(self, instance, validated_data):
+        return services.actualizar_contacto(instance, validated_data)
+
+
+class CambiarEstadoSerializer(serializers.Serializer):
+    estado = serializers.ChoiceField(
+        choices=[Usuario.Estado.ACTIVO, Usuario.Estado.INACTIVO],
+        error_messages={"invalid_choice": "Solo se puede cambiar a Activo o Inactivo."},
+    )

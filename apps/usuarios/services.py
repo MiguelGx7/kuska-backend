@@ -338,3 +338,95 @@ def confirmar_recuperacion(correo, codigo, contrasena_nueva):
 
     if not codigo_valido:
         raise ValidationError({"codigo": [MENSAJE_CODIGO_INVALIDO]})
+
+
+# ---------------------------------------------------------------------
+# Administración de usuarios (RN-04, RN-04c, RN-75)
+# ---------------------------------------------------------------------
+def actualizar_contacto(usuario, datos):
+    """El administrador corrige el correo y el teléfono (RN-04c)."""
+    campos = []
+    if "correo" in datos:
+        correo = normalizar_correo(datos["correo"])
+        if Usuario.objects.filter(correo__iexact=correo).exclude(pk=usuario.pk).exists():
+            raise ValidationError({"correo": ["Ya existe una cuenta con este correo."]})
+        usuario.correo = correo
+        campos.append("correo")
+    if "telefono" in datos:
+        usuario.telefono = datos["telefono"]
+        campos.append("telefono")
+
+    if campos:
+        try:
+            with transaction.atomic():
+                usuario.save(update_fields=[*campos, "fecha_actualizacion"])
+        except IntegrityError:
+            raise ValidationError({"correo": ["Ya existe una cuenta con este correo."]})
+    return usuario
+
+
+def _bloqueo_vigente(usuario, ahora):
+    """
+    Devuelve (hay_bloqueo, bloqueado_hasta) según las sanciones vigentes.
+    De paso marca vigente = 0 los bloqueos temporales que ya vencieron.
+    """
+    Sancion.objects.filter(
+        usuario=usuario,
+        tipo=Sancion.Tipo.BLOQUEO_TEMPORAL,
+        vigente=True,
+        fecha_fin__lte=ahora,
+    ).update(vigente=False)
+
+    vigentes = Sancion.objects.filter(
+        usuario=usuario,
+        vigente=True,
+        tipo__in=[Sancion.Tipo.BLOQUEO_TEMPORAL, Sancion.Tipo.BLOQUEO_PERMANENTE],
+    )
+    if vigentes.filter(tipo=Sancion.Tipo.BLOQUEO_PERMANENTE).exists():
+        return True, None
+    temporal = vigentes.order_by("-fecha_fin").first()
+    if temporal:
+        return True, temporal.fecha_fin
+    return False, None
+
+
+def cambiar_estado(admin, usuario_id, nuevo_estado):
+    """
+    Cambia un usuario entre Activo e Inactivo (RN-04). Bloqueado solo se pone
+    con sanciones. No aplica a administradores ni al propio usuario.
+    """
+    if nuevo_estado not in (Usuario.Estado.ACTIVO, Usuario.Estado.INACTIVO):
+        raise ValidationError({"estado": ["Solo se puede cambiar a Activo o Inactivo."]})
+
+    with transaction.atomic():
+        # Se bloquea la fila y se revisa el estado dentro de la transacción.
+        usuario = Usuario.objects.select_for_update().select_related("rol").get(pk=usuario_id)
+
+        if usuario.pk == admin.pk:
+            raise PermissionDenied("No puedes cambiar tu propio estado.")
+        if usuario.rol.nombre == Rol.ADMINISTRADOR:
+            raise PermissionDenied("No se puede cambiar el estado de un Administrador.")
+
+        if nuevo_estado == Usuario.Estado.INACTIVO:
+            if usuario.estado == Usuario.Estado.INACTIVO:
+                raise ValidationError({"estado": ["El usuario ya está inactivo."]})
+            # Se conserva bloqueado_hasta; al reactivar se recalcula con RN-75.
+            usuario.estado = Usuario.Estado.INACTIVO
+            usuario.save(update_fields=["estado", "fecha_actualizacion"])
+            invalidar_refresh_tokens(usuario)
+            # TODO Paso 9: RN-71/RN-73 (cancelar solicitudes, rechazar o
+            # finalizar donaciones, vaciar carrito y notificar).
+        else:
+            if usuario.estado == Usuario.Estado.ACTIVO:
+                raise ValidationError({"estado": ["El usuario ya está activo."]})
+            if usuario.estado == Usuario.Estado.BLOQUEADO:
+                raise ValidationError(
+                    {"estado": ["Un usuario bloqueado solo se desbloquea cuando vence su sanción."]}
+                )
+            # RN-75: vuelve a Activo, o a Bloqueado si aún tiene un bloqueo vigente.
+            bloqueado, hasta = _bloqueo_vigente(usuario, timezone.now())
+            usuario.estado = Usuario.Estado.BLOQUEADO if bloqueado else Usuario.Estado.ACTIVO
+            usuario.bloqueado_hasta = hasta
+            usuario.save(update_fields=["estado", "bloqueado_hasta", "fecha_actualizacion"])
+
+    return usuario
