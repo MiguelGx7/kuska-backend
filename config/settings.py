@@ -60,8 +60,8 @@ INSTALLED_APPS = [
     "apps.dashboard",
 ]
 
-# Se activa en el Paso 2, antes de la primera migración.
-# AUTH_USER_MODEL = "usuarios.Usuario"
+# Modelo de usuario personalizado (debe existir antes de la primera migración).
+AUTH_USER_MODEL = "usuarios.Usuario"
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",

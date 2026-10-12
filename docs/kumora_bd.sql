@@ -286,8 +286,9 @@ CREATE TABLE notificacion (
   leida         TINYINT(1) NOT NULL DEFAULT 0,
   fecha         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_notif_usuario   FOREIGN KEY (usuario_id)   REFERENCES usuario(id),
-  CONSTRAINT fk_notif_donacion  FOREIGN KEY (donacion_id)  REFERENCES donacion(id),
-  CONSTRAINT fk_notif_solicitud FOREIGN KEY (solicitud_id) REFERENCES solicitud(id),
+  -- SET NULL: la notificacion es historial y se conserva aunque se elimine una donacion Pendiente.
+  CONSTRAINT fk_notif_donacion  FOREIGN KEY (donacion_id)  REFERENCES donacion(id)  ON DELETE SET NULL,
+  CONSTRAINT fk_notif_solicitud FOREIGN KEY (solicitud_id) REFERENCES solicitud(id) ON DELETE SET NULL,
   INDEX idx_notif_usuario (usuario_id, leida)
 );
 

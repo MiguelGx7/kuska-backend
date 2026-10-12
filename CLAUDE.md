@@ -25,7 +25,7 @@ Autor: Miguel Angel Gomez
 
 ## 2. Stack
 
-- Python 3.12, Django 5.x, Django REST Framework
+- Python 3.14, Django 5.2 (LTS), Django REST Framework
 - `djangorestframework-simplejwt` (login con JWT) con su app `token_blacklist`
 - `mysqlclient` (si falla en Windows, usar `PyMySQL`)
 - `python-dotenv`, `django-cors-headers`, `django-filter`, `drf-spectacular` (Swagger)
@@ -103,6 +103,7 @@ El detalle exacto de tipos, restricciones e índices está en `docs/kumora_bd.sq
 - `ENUM` del script → `CharField` con `choices` (`TextChoices`). MySQL quedará con VARCHAR; es normal.
 - Los `CHECK` y los índices del script se declaran en `Meta.constraints` (`CheckConstraint` con `condition=`, `UniqueConstraint`) y `Meta.indexes`.
 - `on_delete`: `CASCADE` donde el script dice `ON DELETE CASCADE`; `PROTECT` en el resto (equivale al RESTRICT de MySQL).
+- Excepción: `notificacion.donacion` y `notificacion.solicitud` usan `SET_NULL` (`ON DELETE SET NULL` en el script), porque la notificación es historial y debe conservarse aunque se elimine una donación `Pendiente` (RN-12).
 - `fecha_registro`/`fecha_creacion` → `auto_now_add=True`; `fecha_actualizacion` → `auto_now=True`.
 - `configuracion.id` → `PositiveSmallIntegerField(primary_key=True, default=1)`.
 - Los roles se buscan siempre por `nombre` ("Donante", "Beneficiario", "Administrador"), nunca por `id`.
