@@ -214,6 +214,7 @@ Idea: un bloqueo **temporal** no desperdicia comida ya comprometida; un bloqueo 
 ## 7. Seguridad y permisos
 
 - Autenticación JWT (access + refresh). Todas las rutas requieren login excepto registro, login y recuperar contraseña.
+- La respuesta del login incluye `access`, `refresh` y los datos básicos del usuario, **incluido su rol**. Cada frontend decide qué roles acepta: el panel web solo `Administrador`; la app móvil solo `Donante` y `Beneficiario`.
 - Clases de permiso: `EsDonante`, `EsBeneficiario`, `EsAdministrador`.
 - Permiso base `EsUsuarioActivo` en todas las rutas protegidas: en **cada petición** se revisa `estado`; si no está `Activo` se rechaza aunque el token sea válido (un bloqueo o una inactivación aplican de inmediato). Si está `Bloqueado` con `bloqueado_hasta` vencido, se desbloquea como en RN-03.
 - Cada usuario solo accede a **sus propios** datos (donaciones, solicitudes, carrito, notificaciones), salvo el administrador.
@@ -227,7 +228,7 @@ Idea: un bloqueo **temporal** no desperdicia comida ya comprometida; un bloqueo 
 
 | Grupo | Rutas principales |
 |---|---|
-| Auth | `auth/registro/`, `auth/login/`, `auth/refresh/`, `auth/perfil/` (ver y editar), `auth/recuperar/solicitar/`, `auth/recuperar/confirmar/` |
+| Auth | `auth/registro/`, `auth/login/`, `auth/refresh/`, `auth/perfil/` (ver y editar), `auth/perfil/cambiar-contrasena/`, `auth/recuperar/solicitar/`, `auth/recuperar/confirmar/` |
 | Donante | `donaciones/` (CRUD mientras Pendiente), `donaciones/{id}/alimentos/`, `donaciones/{id}/solicitudes-recibidas/`, `novedades/`, `solicitudes/{id}/entregar/`, `dashboard/donante/` |
 | Beneficiario | `alimentos-disponibles/` (filtros: categoría, búsqueda, modalidad), `carrito/`, `carrito/enviar/`, `mis-solicitudes/` (filtro por estado), `mis-solicitudes/{id}/cancelar/` |
 | Administrador | `admin/donaciones/` (+ `validar/`, `rechazar/`), `admin/solicitudes/` (+ `aprobar/`, `rechazar/`, `entregar/`), `admin/novedades/` (+ `aceptar/`, `rechazar/`), `admin/sanciones/`, `admin/usuarios/` (+ editar correo y teléfono, `cambiar-estado/`, `impacto/`), `admin/categorias/`, `admin/configuracion/`, `dashboard/admin/` |

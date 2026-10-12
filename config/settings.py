@@ -156,10 +156,15 @@ CLOUDINARY_STORAGE = {"CLOUDINARY_URL": os.environ["CLOUDINARY_URL"]}
 # ---------------------------------------------------------------------
 # Correo (SMTP) para recuperar contraseña
 # ---------------------------------------------------------------------
-EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST = os.getenv("EMAIL_HOST", "")
 EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
 EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+# Sin usuario SMTP configurado, los correos se muestran en la terminal.
+EMAIL_BACKEND = (
+    "django.core.mail.backends.smtp.EmailBackend"
+    if EMAIL_HOST_USER
+    else "django.core.mail.backends.console.EmailBackend"
+)
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
 EMAIL_USE_TLS = True
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER)
@@ -178,8 +183,10 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
+    # Toda ruta exige login y estado Activo, salvo las públicas de auth.
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
+        "apps.usuarios.permissions.EsUsuarioActivo",
     ),
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
@@ -188,9 +195,8 @@ REST_FRAMEWORK = {
         "rest_framework.filters.SearchFilter",
         "rest_framework.filters.OrderingFilter",
     ),
-    # Sin throttling global: solo las vistas de login, registro y
-    # recuperar contraseña usan el scope "auth" (ScopedRateThrottle).
-    # Se limita por IP porque esas rutas son anónimas.
+    # Sin throttling global: solo login, registro y recuperar contraseña
+    # usan el grupo "auth", por IP (apps/usuarios/throttles.py).
     "DEFAULT_THROTTLE_RATES": {
         "auth": "5/min",
     },
@@ -202,7 +208,6 @@ SIMPLE_JWT = {
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
-    "UPDATE_LAST_LOGIN": True,
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
@@ -211,4 +216,9 @@ SPECTACULAR_SETTINGS = {
     "DESCRIPTION": "Red de Alimentos Solidarios: API REST del backend.",
     "VERSION": "1.0.0",
     "SERVE_INCLUDE_SCHEMA": False,
+    # Esquemas separados de entrada y salida (los campos de solo lectura
+    # no aparecen como obligatorios en las peticiones).
+    "COMPONENT_SPLIT_REQUEST": True,
+    # Swagger recuerda el token entre recargas de la página.
+    "SWAGGER_UI_SETTINGS": {"persistAuthorization": True},
 }
