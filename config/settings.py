@@ -227,5 +227,8 @@ SPECTACULAR_SETTINGS = {
         "EstadoCambiableEnum": ["Activo", "Inactivo"],
         "EstadoDonacionEnum": "apps.donaciones.models.Donacion.Estado",
         "EstadoNovedadEnum": "apps.donaciones.models.Novedad.Estado",
+        "EstadoSolicitudEnum": "apps.solicitudes.models.Solicitud.Estado",
+        "ModalidadDonacionEnum": "apps.donaciones.models.Donacion.ModalidadEntrega",
+        "ModalidadSolicitudEnum": "apps.solicitudes.models.Solicitud.ModalidadEntrega",
     },
 }

@@ -22,6 +22,7 @@ from rest_framework.exceptions import NotFound, ValidationError
 from apps.catalogo.models import Categoria, Configuracion
 from apps.notificaciones.models import Notificacion
 from apps.notificaciones.services import crear_notificacion, notificar_administradores
+from apps.solicitudes.models import Solicitud
 from apps.usuarios.models import Usuario
 
 from .models import Donacion, DonacionAlimento, Novedad
@@ -43,6 +44,12 @@ def fecha_minima_vencimiento(config, hoy=None):
 
 def _cumple_vencimiento(fecha_vencimiento, config, hoy=None):
     return fecha_vencimiento > fecha_minima_vencimiento(config, hoy)
+
+
+def formato_cantidad(valor):
+    """Decimal legible para mensajes: 5.00 -> "5", 1.50 -> "1.5"."""
+    texto = f"{valor:f}"
+    return texto.rstrip("0").rstrip(".") if "." in texto else texto
 
 
 def validar_foto(archivo):
@@ -200,6 +207,16 @@ def crear_donacion(donante, datos, fotos):
 # ---------------------------------------------------------------------
 # Donante: cambios mientras está Pendiente (RN-12)
 # ---------------------------------------------------------------------
+def _bloquear_alimentos_de(donacion_id):
+    """
+    Regla 6 (orden fijo de bloqueos): los alimentos se bloquean ANTES que la
+    donación, en orden por id. Se llama antes de bloquear la donación.
+    """
+    return list(
+        DonacionAlimento.objects.select_for_update().filter(donacion_id=donacion_id).order_by("id")
+    )
+
+
 def _bloquear_donacion_propia(donante, donacion_id):
     """Bloquea la fila y revisa que siga Pendiente."""
     try:
@@ -263,12 +280,12 @@ def agregar_alimento(donante, donacion_id, datos, foto):
 
 def quitar_alimento(donante, donacion_id, alimento_id):
     with transaction.atomic():
-        donacion = _bloquear_donacion_propia(donante, donacion_id)
-        alimentos = DonacionAlimento.objects.select_for_update().filter(donacion=donacion)
-        alimento = alimentos.filter(pk=alimento_id).first()
+        alimentos = _bloquear_alimentos_de(donacion_id)
+        _bloquear_donacion_propia(donante, donacion_id)
+        alimento = next((a for a in alimentos if a.pk == alimento_id), None)
         if alimento is None:
             raise NotFound("Ese alimento no pertenece a esta donación.")
-        if alimentos.count() == 1:
+        if len(alimentos) == 1:
             raise ValidationError(
                 "La donación debe tener al menos un alimento. "
                 "Si ya no quieres donar, elimina la donación."
@@ -279,9 +296,10 @@ def quitar_alimento(donante, donacion_id, alimento_id):
 
 def eliminar_donacion(donante, donacion_id):
     with transaction.atomic():
+        # El borrado en cascada también toca los alimentos: se bloquean antes.
+        alimentos = _bloquear_alimentos_de(donacion_id)
         donacion = _bloquear_donacion_propia(donante, donacion_id)
-        fotos = list(donacion.alimentos.values_list("foto", flat=True))
-        _borrar_fotos_al_confirmar(fotos)
+        _borrar_fotos_al_confirmar([a.foto.name for a in alimentos])
         # Los alimentos se borran en cascada; las notificaciones quedan con donacion = NULL.
         donacion.delete()
 
@@ -291,8 +309,12 @@ def eliminar_donacion(donante, donacion_id):
 # ---------------------------------------------------------------------
 def _bloquear_pendiente(donacion_id):
     try:
+        # of=("self",): bloquea solo la donación, no la fila del donante que se
+        # lee en la misma consulta (el usuario va antes en el orden de la regla 6).
         donacion = (
-            Donacion.objects.select_for_update().select_related("donante").get(pk=donacion_id)
+            Donacion.objects.select_for_update(of=("self",))
+            .select_related("donante")
+            .get(pk=donacion_id)
         )
     except Donacion.DoesNotExist:
         raise NotFound("No encontramos esa donación.")
@@ -317,9 +339,9 @@ def calcular_max_por_solicitud(alimento, porcentaje):
 
 def validar_donacion(admin, donacion_id):
     with transaction.atomic():
+        alimentos = _bloquear_alimentos_de(donacion_id)
         donacion = _bloquear_pendiente(donacion_id)
         config = Configuracion.objects.get(pk=1)
-        alimentos = list(DonacionAlimento.objects.select_for_update().filter(donacion=donacion))
 
         # RN-11 otra vez: si alguno ya no cumple, no se puede validar.
         vencidos = [a for a in alimentos if not _cumple_vencimiento(a.fecha_vencimiento, config)]
@@ -396,3 +418,79 @@ def alimentos_visibles():
         .filter(~Exists(novedad_pendiente))
         .select_related("categoria", "donacion", "donacion__donante")
     )
+
+
+def motivos_no_visible(alimentos, config=None):
+    """
+    RN-14 explicado: devuelve {alimento_id: motivo} solo para los alimentos
+    que hoy NO se pueden pedir. Los alimentos deben venir con
+    select_related("donacion__donante").
+    """
+    config = config or Configuracion.objects.get(pk=1)
+    minima = fecha_minima_vencimiento(config)
+    ids = [a.pk for a in alimentos]
+    donaciones = {a.donacion_id for a in alimentos}
+    novedades = Novedad.objects.filter(estado=Novedad.Estado.PENDIENTE).filter(
+        Q(donacion_alimento_id__in=ids) | Q(donacion_id__in=donaciones, donacion_alimento__isnull=True)
+    ).values_list("donacion_id", "donacion_alimento_id")
+    con_novedad = {alimento for _, alimento in novedades if alimento}
+    donaciones_con_novedad = {donacion for donacion, alimento in novedades if alimento is None}
+
+    motivos = {}
+    for a in alimentos:
+        if not a.activo:
+            motivo = "Este alimento fue retirado de la donación."
+        elif a.cantidad_disponible <= 0:
+            motivo = "Este alimento se agotó."
+        elif a.fecha_vencimiento <= minima:
+            motivo = "Este alimento está muy cerca de vencer y ya no se puede pedir."
+        elif a.donacion.estado != Donacion.Estado.VALIDADA:
+            motivo = "Esta donación ya no está disponible."
+        elif a.donacion.donante.estado != Usuario.Estado.ACTIVO:
+            motivo = "El donante no está disponible por ahora."
+        elif a.pk in con_novedad or a.donacion_id in donaciones_con_novedad:
+            motivo = "Este alimento está en revisión por una novedad del donante."
+        else:
+            continue
+        motivos[a.pk] = motivo
+    return motivos
+
+
+# ---------------------------------------------------------------------
+# Estado de la donación (RN-16)
+# ---------------------------------------------------------------------
+def recalcular_estado_donacion(donacion):
+    """
+    Solo usa condiciones permanentes. Un alimento "tiene disponibilidad" si
+    está activo, con cantidad disponible y vencimiento posterior a
+    hoy + margen. Las temporales (novedad Pendiente, donante bloqueado)
+    no cambian el estado.
+    - Validada: algún alimento tiene disponibilidad.
+    - Agotada: ninguno, pero hay solicitudes Pendiente o Aprobada.
+    - Finalizada: ninguno y sin solicitudes en curso. Es final.
+    Pendiente y Rechazada no se tocan.
+    """
+    with transaction.atomic():
+        donacion = Donacion.objects.select_for_update().get(pk=donacion.pk)
+        if donacion.estado not in (Donacion.Estado.VALIDADA, Donacion.Estado.AGOTADA):
+            return donacion
+
+        config = Configuracion.objects.get(pk=1)
+        con_disponibilidad = donacion.alimentos.filter(
+            activo=True,
+            cantidad_disponible__gt=0,
+            fecha_vencimiento__gt=fecha_minima_vencimiento(config),
+        ).exists()
+        if con_disponibilidad:
+            nuevo = Donacion.Estado.VALIDADA
+        elif Solicitud.objects.filter(
+            donacion=donacion, estado__in=Solicitud.ESTADOS_EN_CURSO
+        ).exists():
+            nuevo = Donacion.Estado.AGOTADA
+        else:
+            nuevo = Donacion.Estado.FINALIZADA
+
+        if nuevo != donacion.estado:
+            donacion.estado = nuevo
+            donacion.save(update_fields=["estado", "fecha_actualizacion"])
+    return donacion

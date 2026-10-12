@@ -49,6 +49,11 @@ class Solicitud(models.Model):
         RECOGER = "Recoger"
         DOMICILIO = "Domicilio"
 
+    # Solicitudes "activas" o "en curso" (RN-16, RN-20, RN-22).
+    ESTADOS_EN_CURSO = (Estado.PENDIENTE, Estado.APROBADA)
+    # Desde estos estados el beneficiario ve teléfono y dirección del donante (RN-29).
+    ESTADOS_CON_CONTACTO = (Estado.APROBADA, Estado.ENTREGADA, Estado.NO_RECOGIDA)
+
     # Formato KUM-AAAAMMDD-NNNN; agrupa las solicitudes de un mismo carrito.
     codigo_pedido = models.CharField(max_length=20)
     beneficiario = models.ForeignKey(

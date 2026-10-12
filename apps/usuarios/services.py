@@ -310,6 +310,8 @@ def confirmar_recuperacion(correo, codigo, contrasena_nueva):
     # fallido sí quede guardado.
     codigo_valido = False
     with transaction.atomic():
+        # Regla 6: primero el usuario (luego se le cambia la contraseña), después su código.
+        Usuario.objects.select_for_update().get(pk=usuario.pk)
         recuperacion = (
             RecuperacionContrasena.objects.select_for_update()
             .filter(usuario=usuario, usado=False)
@@ -400,7 +402,10 @@ def cambiar_estado(admin, usuario_id, nuevo_estado):
 
     with transaction.atomic():
         # Se bloquea la fila y se revisa el estado dentro de la transacción.
-        usuario = Usuario.objects.select_for_update().select_related("rol").get(pk=usuario_id)
+        # of=("self",): bloquea solo al usuario, no la fila compartida de su rol.
+        usuario = (
+            Usuario.objects.select_for_update(of=("self",)).select_related("rol").get(pk=usuario_id)
+        )
 
         if usuario.pk == admin.pk:
             raise PermissionDenied("No puedes cambiar tu propio estado.")

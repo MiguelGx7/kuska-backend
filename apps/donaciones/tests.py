@@ -513,3 +513,62 @@ class AlimentosDisponiblesTests(BaseDonacionTest):
     def test_margen_de_la_configuracion(self):
         Configuracion.objects.filter(pk=1).update(margen_vencimiento_dias=40)
         self.assertEqual(self.ids(), set())
+
+
+# =====================================================================
+# Estado de la donación (RN-16), Paso 6
+# =====================================================================
+class RecalcularEstadoTests(BaseDonacionTest):
+    def solicitud(self, donacion, estado="Pendiente"):
+        from apps.solicitudes.models import Solicitud
+
+        return Solicitud.objects.create(
+            codigo_pedido="KUM-20260101-0001", beneficiario=self.beneficiario, donacion=donacion,
+            modalidad_entrega="Recoger", estado=estado,
+            motivo_rechazo="x" if estado == "Rechazada" else None,
+        )
+
+    def recalcular(self, donacion):
+        from .services import recalcular_estado_donacion
+
+        return recalcular_estado_donacion(donacion).estado
+
+    def test_con_disponibilidad_queda_validada(self):
+        d = self.crear_en_bd(estado="Agotada")
+        self.assertEqual(self.recalcular(d), "Validada")
+
+    def test_sin_disponibilidad_y_con_solicitudes_en_curso_queda_agotada(self):
+        for estado in ("Pendiente", "Aprobada"):
+            with self.subTest(estado=estado):
+                d = self.crear_en_bd(estado="Validada", cantidad_disponible=Decimal("0"))
+                self.solicitud(d, estado)
+                self.assertEqual(self.recalcular(d), "Agotada")
+
+    def test_sin_disponibilidad_ni_solicitudes_en_curso_queda_finalizada(self):
+        d = self.crear_en_bd(estado="Agotada", cantidad_disponible=Decimal("0"))
+        self.solicitud(d, "Entregada")
+        self.assertEqual(self.recalcular(d), "Finalizada")
+
+    def test_inactivo_o_vencido_cuenta_como_sin_disponibilidad(self):
+        d1 = self.crear_en_bd(estado="Validada", activo=False)
+        d2 = self.crear_en_bd(estado="Validada", fecha_vencimiento=timezone.localdate() + timedelta(days=1))
+        self.assertEqual(self.recalcular(d1), "Finalizada")
+        self.assertEqual(self.recalcular(d2), "Finalizada")
+
+    def test_finalizada_es_final(self):
+        d = self.crear_en_bd(estado="Validada", cantidad_disponible=Decimal("0"))
+        self.assertEqual(self.recalcular(d), "Finalizada")
+        DonacionAlimento.objects.filter(donacion=d).update(cantidad_disponible=Decimal("5"))
+        self.assertEqual(self.recalcular(d), "Finalizada")
+
+    def test_pendiente_y_rechazada_no_cambian(self):
+        self.assertEqual(self.recalcular(self.crear_en_bd(cantidad_disponible=Decimal("0"))), "Pendiente")
+        self.assertEqual(self.recalcular(self.crear_en_bd(estado="Rechazada")), "Rechazada")
+
+    def test_condiciones_temporales_no_cambian_el_estado(self):
+        d = self.crear_en_bd(estado="Validada")
+        Novedad.objects.create(donante=self.donante, donacion=d, descripcion="toda")
+        Usuario.objects.filter(pk=self.donante.pk).update(
+            estado="Bloqueado", bloqueado_hasta=timezone.now() + timedelta(days=1)
+        )
+        self.assertEqual(self.recalcular(d), "Validada")

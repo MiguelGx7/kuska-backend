@@ -16,6 +16,7 @@ Autor: Miguel Angel Gomez
 4. Los estados son **fijos** (`TextChoices`), no tablas. El administrador solo **cambia** estados, no los crea.
 5. La lógica de negocio va en `services.py` de cada app. Las vistas y serializers deben ser delgados.
 6. Toda operación que toque cantidades o varios registros va en `transaction.atomic()` y usa `select_for_update()` sobre `donacion_alimento`. Toda acción que cambie el estado de una solicitud, una donación o una novedad **bloquea primero esa fila** con `select_for_update()` y vuelve a revisar su estado antes de actuar (evita choques, ej. el beneficiario cancela mientras el admin aprueba).
+   - **Orden fijo de bloqueos**: usuario → solicitud → alimentos (`donacion_alimento`, en orden por `id`) → configuración → donación. Toda operación que bloquee varias filas lo hace en este orden (saltando las que no necesita). Si dos peticiones bloquearan las mismas filas en orden distinto, cada una podría quedarse esperando la fila que tiene la otra (bloqueo cruzado o *deadlock*); con un orden único, la segunda simplemente espera su turno. El código de recuperación (`recuperacion_contrasena`) se bloquea después del usuario.
 7. Mensajes de error y de validación **en español**, claros para el usuario final.
 8. Nunca escribir credenciales en el código. Todo sale de `.env` (que está en `.gitignore`).
 9. No usar `db.sqlite3`. La base de datos es MySQL en Aiven.
@@ -250,7 +251,7 @@ Listados con paginación y filtros (`django-filter`).
 3. **Autenticación**: registro, login JWT (con RN-03), perfil, recuperar contraseña (RN-04b) y permisos.
 4. **Administración básica**: categorías, usuarios (cambiar estado) y configuración.
 5. **Donaciones**: crear/editar/eliminar en Pendiente, validar/rechazar (RN-10 a RN-14).
-6. **Carrito y envío de solicitudes** (RN-20 a RN-23).
+6. **Carrito y envío de solicitudes** (RN-20 a RN-23). Aquí también se implementó RN-16 (`recalcular_estado_donacion()` en `donaciones/services.py`), porque es el primer paso que cambia cantidades.
 7. **Gestión de solicitudes y entregas** (RN-24 a RN-28, RN-15, RN-16).
 8. **Novedades** (RN-30 a RN-33).
 9. **Sanciones y bloqueos** (RN-03 a RN-08, RN-70 a RN-77). Incluye los efectos en cascada de RN-71/RN-73 al inactivar (el endpoint `admin/usuarios/{id}/cambiar-estado/` ya existe desde el Paso 4 y tiene un `# TODO Paso 9` en `usuarios/services.py`) y el endpoint `admin/usuarios/{id}/impacto/` (RN-74).
