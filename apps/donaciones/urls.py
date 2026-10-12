@@ -6,6 +6,8 @@ from . import views
 router = SimpleRouter()
 router.register("donaciones", views.DonacionDonanteViewSet, basename="donaciones")
 router.register("admin/donaciones", views.AdminDonacionViewSet, basename="admin-donaciones")
+router.register("novedades", views.NovedadDonanteViewSet, basename="novedades")
+router.register("admin/novedades", views.AdminNovedadViewSet, basename="admin-novedades")
 
 urlpatterns = [
     path(

@@ -401,7 +401,7 @@ def cancelar_solicitud(beneficiario, solicitud_id):
 MOTIVO_PENDIENTE_VENCIDA = "Los alimentos vencieron antes de ser aprobada"
 
 
-def _texto_fecha(valor):
+def texto_fecha(valor):
     return f"{timezone.localtime(valor):%d/%m/%Y a las %H:%M}"
 
 
@@ -498,7 +498,7 @@ def marcar_no_recogida_si_vencida(solicitud, ahora=None):
         Notificacion.Tipo.SOLICITUD_NO_RECOGIDA,
         "Solicitud no recogida",
         f"Tu solicitud {solicitud.codigo_pedido} de «{titulo}» venció sin ser entregada "
-        f"(fecha límite: {_texto_fecha(solicitud.fecha_limite_recogida)}).",
+        f"(fecha límite: {texto_fecha(solicitud.fecha_limite_recogida)}).",
         f"La solicitud {solicitud.codigo_pedido} de {solicitud.beneficiario.nombre_para_mostrar} "
         f"sobre tu donación «{titulo}» venció sin ser entregada. "
         "Los alimentos volvieron a estar disponibles.",
@@ -591,7 +591,7 @@ def aprobar_solicitud(admin, solicitud_id):
         donante = solicitud.donacion.donante
         titulo = solicitud.donacion.titulo
         entrega = _texto_entrega(solicitud)
-        fecha = _texto_fecha(limite)
+        fecha = texto_fecha(limite)
         crear_notificacion(
             solicitud.beneficiario,
             Notificacion.Tipo.SOLICITUD_APROBADA,

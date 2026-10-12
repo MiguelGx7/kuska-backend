@@ -4,7 +4,7 @@ from decimal import Decimal
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from .models import Donacion, DonacionAlimento
+from .models import Donacion, DonacionAlimento, Novedad
 
 EJEMPLO_DATOS = {
     "titulo": "Mercado de la semana",
@@ -182,3 +182,66 @@ class AlimentoDisponibleSerializer(FotoUrlMixin, serializers.ModelSerializer):
             "donacion", "donacion_titulo", "modalidad_entrega", "donante_nombre",
         )
         read_only_fields = fields
+
+
+# ---------------------------------------------------------------------
+# Novedades (Paso 8)
+# ---------------------------------------------------------------------
+class NovedadCrearSerializer(serializers.Serializer):
+    donacion = serializers.IntegerField(help_text="id de tu donación Validada o Agotada.")
+    donacion_alimento = serializers.IntegerField(
+        required=False, allow_null=True,
+        help_text="id del alimento afectado. Vacío o null = afecta toda la donación.",
+    )
+    descripcion = serializers.CharField(
+        error_messages={
+            "required": "Describe qué pasó con los alimentos.",
+            "blank": "Describe qué pasó con los alimentos.",
+        },
+    )
+
+
+class NovedadSerializer(serializers.ModelSerializer):
+    donacion_titulo = serializers.CharField(source="donacion.titulo", read_only=True)
+    alimento_nombre = serializers.CharField(
+        source="donacion_alimento.nombre", read_only=True, allow_null=True, default=None
+    )
+
+    class Meta:
+        model = Novedad
+        fields = (
+            "id", "donacion", "donacion_titulo", "donacion_alimento", "alimento_nombre",
+            "descripcion", "estado", "respuesta_admin", "fecha_creacion", "fecha_revision",
+        )
+        read_only_fields = fields
+
+
+class AdminNovedadSerializer(NovedadSerializer):
+    donante = DonanteResumenSerializer(read_only=True)
+    revisada_por = serializers.EmailField(source="revisada_por.correo", read_only=True, allow_null=True)
+    solicitudes_afectadas = serializers.SerializerMethodField(
+        help_text="Solicitudes Pendiente o Aprobada con alimentos afectados (impacto de aceptarla)."
+    )
+
+    class Meta(NovedadSerializer.Meta):
+        fields = (*NovedadSerializer.Meta.fields, "donante", "revisada_por", "solicitudes_afectadas")
+        read_only_fields = fields
+
+    def get_solicitudes_afectadas(self, obj) -> int:
+        from .services import contar_solicitudes_afectadas
+
+        return contar_solicitudes_afectadas(obj)
+
+
+class AceptarNovedadSerializer(serializers.Serializer):
+    respuesta_admin = serializers.CharField(max_length=255, required=False, allow_blank=True)
+
+
+class RechazarNovedadSerializer(serializers.Serializer):
+    respuesta_admin = serializers.CharField(
+        max_length=255,
+        error_messages={
+            "required": "Debes indicar la respuesta al donante.",
+            "blank": "Debes indicar la respuesta al donante.",
+        },
+    )

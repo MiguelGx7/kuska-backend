@@ -494,3 +494,245 @@ def recalcular_estado_donacion(donacion):
             donacion.estado = nuevo
             donacion.save(update_fields=["estado", "fecha_actualizacion"])
     return donacion
+
+
+# =====================================================================
+# Novedades (RN-30 a RN-33), Paso 8
+# Orden de bloqueos (regla 6): usuario -> novedad -> solicitud ->
+# alimentos (por id) -> configuración -> donación.
+# =====================================================================
+MOTIVO_CANCELACION_NOVEDAD = "Los alimentos fueron retirados por una novedad del donante."
+
+
+def _objeto_novedad(novedad):
+    if novedad.donacion_alimento_id:
+        return f"el alimento «{novedad.donacion_alimento.nombre}»"
+    return "toda la donación"
+
+
+def crear_novedad(donante, donacion_id, alimento_id, descripcion):
+    """
+    RN-30: solo el donante dueño, sobre una donación Validada o Agotada, sobre
+    un alimento suyo o sobre toda la donación. Máximo una Pendiente por
+    alimento y una por toda la donación. Notifica a los administradores.
+    """
+    with transaction.atomic():
+        # Turno del donante: dos peticiones suyas no crean dos Pendiente iguales.
+        Usuario.objects.select_for_update().get(pk=donante.pk)
+
+        donacion = Donacion.objects.filter(pk=donacion_id, donante=donante).first()
+        if donacion is None:
+            raise NotFound("No encontramos esa donación.")
+        if donacion.estado not in (Donacion.Estado.VALIDADA, Donacion.Estado.AGOTADA):
+            mensaje = (
+                "Mientras la donación está Pendiente puedes editarla directamente."
+                if donacion.estado == Donacion.Estado.PENDIENTE
+                else f"No se pueden reportar novedades sobre una donación {donacion.estado}."
+            )
+            raise ValidationError({"donacion": [mensaje]})
+
+        alimento = None
+        if alimento_id is not None:
+            alimento = DonacionAlimento.objects.filter(pk=alimento_id, donacion=donacion).first()
+            if alimento is None:
+                raise ValidationError({"donacion_alimento": ["Ese alimento no pertenece a esta donación."]})
+            if not alimento.activo:
+                raise ValidationError({"donacion_alimento": ["Ese alimento ya fue retirado de la donación."]})
+
+        repetida = Novedad.objects.filter(
+            donacion=donacion, donacion_alimento=alimento, estado=Novedad.Estado.PENDIENTE
+        ).exists()
+        if repetida:
+            objeto = "este alimento" if alimento else "toda la donación"
+            raise ValidationError(
+                {"donacion_alimento": [f"Ya hay una novedad pendiente sobre {objeto}."]}
+            )
+
+        novedad = Novedad.objects.create(
+            donante=donante, donacion=donacion, donacion_alimento=alimento, descripcion=descripcion
+        )
+        notificar_administradores(
+            Notificacion.Tipo.NOVEDAD_CREADA,
+            "Nueva novedad por revisar",
+            f"{donante.nombre_para_mostrar} reportó una novedad sobre {_objeto_novedad(novedad)} "
+            f"de «{donacion.titulo}»: {descripcion}",
+            donacion=donacion,
+        )
+    return novedad
+
+
+def _bloquear_novedad_pendiente(novedad_id):
+    try:
+        novedad = (
+            Novedad.objects.select_for_update(of=("self",))
+            .select_related("donacion__donante", "donacion_alimento")
+            .get(pk=novedad_id)
+        )
+    except Novedad.DoesNotExist:
+        raise NotFound("No encontramos esa novedad.")
+    if novedad.estado != Novedad.Estado.PENDIENTE:
+        raise ValidationError(f"Esta novedad ya fue revisada (estado: {novedad.estado}).")
+    return novedad
+
+
+def _alimentos_afectados_ids(novedad):
+    if novedad.donacion_alimento_id:
+        return [novedad.donacion_alimento_id]
+    return list(novedad.donacion.alimentos.order_by("id").values_list("id", flat=True))
+
+
+def _bloquear_solicitudes_afectadas(novedad, alimentos_ids, estados=Solicitud.ESTADOS_EN_CURSO):
+    """Solicitudes en esos estados con algún detalle NO cancelado de los alimentos afectados."""
+    ids = (
+        Solicitud.objects.filter(
+            donacion_id=novedad.donacion_id,
+            estado__in=estados,
+            detalles__donacion_alimento_id__in=alimentos_ids,
+            detalles__cancelado=False,
+        )
+        .values_list("id", flat=True)
+        .distinct()
+    )
+    return list(
+        Solicitud.objects.select_for_update(of=("self",))
+        .select_related("beneficiario")
+        .filter(pk__in=list(ids))
+        .order_by("id")
+    )
+
+
+def _fecha_limite_tras_novedad(solicitud, config, fecha_revision):
+    """
+    RN-24 sin los detalles cancelados, con base en fecha_gestion. RN-31: si
+    esa fecha ya pasó, la base es la fecha de revisión de la novedad.
+    """
+    from apps.solicitudes.services import calcular_fecha_limite  # evita importación circular
+
+    limite = calcular_fecha_limite(solicitud, config, solicitud.fecha_gestion)
+    if limite <= fecha_revision:
+        limite = calcular_fecha_limite(solicitud, config, fecha_revision)
+    return limite
+
+
+def contar_solicitudes_afectadas(novedad):
+    """Para que el administrador vea el impacto antes de decidir."""
+    return (
+        Solicitud.objects.filter(
+            donacion_id=novedad.donacion_id,
+            estado__in=Solicitud.ESTADOS_EN_CURSO,
+            detalles__donacion_alimento_id__in=_alimentos_afectados_ids(novedad),
+            detalles__cancelado=False,
+        )
+        .distinct()
+        .count()
+    )
+
+
+def aceptar_novedad(admin, novedad_id, respuesta=None):
+    """RN-32 (y RN-31 para la fecha límite)."""
+    from apps.solicitudes.models import DetalleSolicitud
+    from apps.solicitudes.services import texto_fecha  # import local: evita importación circular
+
+    with transaction.atomic():
+        novedad = _bloquear_novedad_pendiente(novedad_id)
+        donacion = novedad.donacion
+        ahora = timezone.now()
+        alimentos_ids = _alimentos_afectados_ids(novedad)
+        solicitudes = _bloquear_solicitudes_afectadas(novedad, alimentos_ids)
+
+        # Alimentos afectados: se dan de baja (se bloquean en orden por id).
+        alimentos = list(
+            DonacionAlimento.objects.select_for_update().filter(pk__in=alimentos_ids).order_by("id")
+        )
+        for alimento in alimentos:
+            alimento.activo = False
+            alimento.cantidad_disponible = Decimal("0")
+        DonacionAlimento.objects.bulk_update(alimentos, ["activo", "cantidad_disponible"])
+
+        config = Configuracion.objects.get(pk=1)
+        motivo = f"el donante reportó una novedad: {novedad.descripcion}"
+        for solicitud in solicitudes:
+            cancelados = solicitud.detalles.filter(
+                donacion_alimento_id__in=alimentos_ids, cancelado=False
+            ).select_related("donacion_alimento")
+            nombres = ", ".join(d.donacion_alimento.nombre for d in cancelados)
+            DetalleSolicitud.objects.filter(pk__in=[d.pk for d in cancelados]).update(cancelado=True)
+
+            if not solicitud.detalles.filter(cancelado=False).exists():
+                solicitud.estado = Solicitud.Estado.CANCELADA
+                solicitud.motivo_cancelacion = MOTIVO_CANCELACION_NOVEDAD
+                solicitud.save(update_fields=["estado", "motivo_cancelacion", "fecha_actualizacion"])
+                crear_notificacion(
+                    solicitud.beneficiario,
+                    Notificacion.Tipo.SOLICITUD_CANCELADA,
+                    "Tu solicitud fue cancelada",
+                    f"Tu solicitud {solicitud.codigo_pedido} de «{donacion.titulo}» se canceló porque "
+                    f"{motivo}",
+                    solicitud=solicitud,
+                )
+                continue
+
+            extra = ""
+            if solicitud.estado == Solicitud.Estado.APROBADA:
+                solicitud.fecha_limite_recogida = _fecha_limite_tras_novedad(solicitud, config, ahora)
+                solicitud.save(update_fields=["fecha_limite_recogida", "fecha_actualizacion"])
+                extra = f" Nueva fecha límite: {texto_fecha(solicitud.fecha_limite_recogida)}."
+            crear_notificacion(
+                solicitud.beneficiario,
+                Notificacion.Tipo.ALIMENTO_CANCELADO,
+                "Se retiraron alimentos de tu solicitud",
+                f"De tu solicitud {solicitud.codigo_pedido} de «{donacion.titulo}» se retiró: {nombres}, "
+                f"porque {motivo}.{extra}",
+                solicitud=solicitud,
+            )
+
+        novedad.estado = Novedad.Estado.ACEPTADA
+        novedad.respuesta_admin = respuesta or None
+        novedad.revisada_por = admin
+        novedad.fecha_revision = ahora
+        novedad.save()
+
+        recalcular_estado_donacion(donacion)
+
+        detalle = f" Respuesta: {respuesta}" if respuesta else ""
+        crear_notificacion(
+            donacion.donante,
+            Notificacion.Tipo.NOVEDAD_ACEPTADA,
+            "Tu novedad fue aceptada",
+            f"Se aceptó tu novedad sobre {_objeto_novedad(novedad)} de «{donacion.titulo}»: "
+            f"se retiró de la donación y {len(solicitudes)} solicitud(es) fueron ajustadas.{detalle}",
+            donacion=donacion,
+        )
+    return novedad
+
+
+def rechazar_novedad(admin, novedad_id, respuesta):
+    """RN-33 (y RN-31 para la fecha límite): lo afectado vuelve a mostrarse."""
+    with transaction.atomic():
+        novedad = _bloquear_novedad_pendiente(novedad_id)
+        ahora = timezone.now()
+        # RN-31: Aprobadas afectadas cuya fecha límite ya pasó mientras la novedad estaba Pendiente.
+        aprobadas = _bloquear_solicitudes_afectadas(
+            novedad, _alimentos_afectados_ids(novedad), estados=[Solicitud.Estado.APROBADA]
+        )
+        config = Configuracion.objects.get(pk=1)
+        for solicitud in aprobadas:
+            if solicitud.fecha_limite_recogida and solicitud.fecha_limite_recogida <= ahora:
+                solicitud.fecha_limite_recogida = _fecha_limite_tras_novedad(solicitud, config, ahora)
+                solicitud.save(update_fields=["fecha_limite_recogida", "fecha_actualizacion"])
+
+        novedad.estado = Novedad.Estado.RECHAZADA
+        novedad.respuesta_admin = respuesta
+        novedad.revisada_por = admin
+        novedad.fecha_revision = ahora
+        novedad.save()
+
+        crear_notificacion(
+            novedad.donacion.donante,
+            Notificacion.Tipo.NOVEDAD_RECHAZADA,
+            "Tu novedad fue rechazada",
+            f"Se rechazó tu novedad sobre {_objeto_novedad(novedad)} de «{novedad.donacion.titulo}». "
+            f"Respuesta: {respuesta}. Los alimentos siguen disponibles para los beneficiarios.",
+            donacion=novedad.donacion,
+        )
+    return novedad

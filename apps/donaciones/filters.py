@@ -1,6 +1,15 @@
 import django_filters
 
-from .models import Donacion, DonacionAlimento
+from .models import Donacion, DonacionAlimento, Novedad
+
+
+class AdminNovedadFilter(django_filters.FilterSet):
+    donacion = django_filters.NumberFilter(field_name="donacion_id", help_text="id de la donación")
+    donante = django_filters.NumberFilter(field_name="donante_id", help_text="id del donante")
+
+    class Meta:
+        model = Novedad
+        fields = ["estado", "donacion", "donante"]
 
 
 class AdminDonacionFilter(django_filters.FilterSet):

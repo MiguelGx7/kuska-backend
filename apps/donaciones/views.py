@@ -12,11 +12,16 @@ from apps.solicitudes.serializers import AlimentoConSolicitudesSerializer
 from apps.usuarios.permissions import PERMISOS_ADMIN, PERMISOS_BENEFICIARIO, PERMISOS_DONANTE
 
 from . import services
-from .filters import AdminDonacionFilter, AlimentoDisponibleFilter
-from .models import Donacion, DonacionAlimento
+from .filters import AdminDonacionFilter, AdminNovedadFilter, AlimentoDisponibleFilter
+from .models import Donacion, DonacionAlimento, Novedad
 from .serializers import (
+    AceptarNovedadSerializer,
     AdminDonacionSerializer,
+    AdminNovedadSerializer,
     AlimentoDisponibleSerializer,
+    NovedadCrearSerializer,
+    NovedadSerializer,
+    RechazarNovedadSerializer,
     AlimentoNuevoSerializer,
     AlimentoSerializer,
     DonacionEditarSerializer,
@@ -234,3 +239,105 @@ class AlimentoDisponibleListView(generics.ListAPIView):
 
     def get_queryset(self):
         return services.alimentos_visibles().order_by("fecha_vencimiento", "id")
+
+
+# ---------------------------------------------------------------------
+# Novedades (Paso 8)
+# ---------------------------------------------------------------------
+def _novedades():
+    return Novedad.objects.select_related(
+        "donacion", "donacion_alimento", "donante", "revisada_por"
+    ).order_by("-fecha_creacion", "-id")
+
+
+@extend_schema_view(
+    list=extend_schema(summary="Mis novedades", description="Filtros: estado y donacion (id)."),
+    retrieve=extend_schema(summary="Ver una de mis novedades"),
+)
+@extend_schema(tags=["Donante - Novedades"])
+class NovedadDonanteViewSet(
+    mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet
+):
+    permission_classes = PERMISOS_DONANTE
+    serializer_class = NovedadSerializer
+    queryset = Novedad.objects.none()  # referencia para Swagger; ver get_queryset()
+    filterset_fields = ["estado", "donacion"]
+    ordering_fields = ["fecha_creacion", "estado"]
+
+    def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return Novedad.objects.none()
+        return _novedades().filter(donante=self.request.user)
+
+    @extend_schema(
+        summary="Reportar una novedad (RN-30)",
+        description=(
+            "Sobre tu donación Validada o Agotada: un alimento (donacion_alimento) o toda la donación "
+            "(sin donacion_alimento). Máximo una Pendiente por alimento y una por toda la donación. "
+            "Mientras está Pendiente, lo afectado deja de mostrarse para pedir."
+        ),
+        request=NovedadCrearSerializer,
+        responses={201: NovedadSerializer},
+    )
+    def create(self, request):
+        serializer = NovedadCrearSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        datos = serializer.validated_data
+        novedad = services.crear_novedad(
+            request.user, datos["donacion"], datos.get("donacion_alimento"), datos["descripcion"]
+        )
+        return Response(NovedadSerializer(_novedades().get(pk=novedad.pk)).data, status=status.HTTP_201_CREATED)
+
+
+@extend_schema_view(
+    list=extend_schema(summary="Listar novedades", description="Filtros: estado, donacion (id) y donante (id)."),
+    retrieve=extend_schema(
+        summary="Ver una novedad",
+        description="Incluye cuántas solicitudes en curso se verían afectadas si se acepta.",
+    ),
+)
+@extend_schema(tags=["Admin - Novedades"])
+class AdminNovedadViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = PERMISOS_ADMIN
+    serializer_class = AdminNovedadSerializer
+    filterset_class = AdminNovedadFilter
+    search_fields = ["descripcion", "donacion__titulo", "donante__correo"]
+    ordering_fields = ["fecha_creacion", "estado"]
+
+    def get_queryset(self):
+        return _novedades()
+
+    def _respuesta(self, novedad_id):
+        return Response(AdminNovedadSerializer(self.get_queryset().get(pk=novedad_id)).data)
+
+    @extend_schema(
+        summary="Aceptar novedad (RN-32)",
+        description=(
+            "Retira los alimentos afectados, cancela sus detalles en las solicitudes Pendiente o "
+            "Aprobada (o la solicitud completa si no le queda nada), recalcula fechas límite y la "
+            "donación, y notifica a los beneficiarios afectados y al donante."
+        ),
+        request=AceptarNovedadSerializer,
+        responses={200: AdminNovedadSerializer},
+    )
+    @action(detail=True, methods=["post"])
+    def aceptar(self, request, pk=None):
+        novedad = self.get_object()
+        serializer = AceptarNovedadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        services.aceptar_novedad(request.user, novedad.pk, serializer.validated_data.get("respuesta_admin"))
+        return self._respuesta(novedad.pk)
+
+    @extend_schema(
+        summary="Rechazar novedad (RN-33)",
+        description="Respuesta obligatoria. Lo afectado vuelve a mostrarse y se notifica al donante.",
+        request=RechazarNovedadSerializer,
+        responses={200: AdminNovedadSerializer},
+    )
+    @action(detail=True, methods=["post"])
+    def rechazar(self, request, pk=None):
+        novedad = self.get_object()
+        serializer = RechazarNovedadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        services.rechazar_novedad(request.user, novedad.pk, serializer.validated_data["respuesta_admin"])
+        return self._respuesta(novedad.pk)

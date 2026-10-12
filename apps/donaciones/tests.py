@@ -572,3 +572,139 @@ class RecalcularEstadoTests(BaseDonacionTest):
             estado="Bloqueado", bloqueado_hasta=timezone.now() + timedelta(days=1)
         )
         self.assertEqual(self.recalcular(d), "Validada")
+
+
+# =====================================================================
+# Novedades: crear, listar y revisar (RN-30), Paso 8
+# Los efectos de aceptar/rechazar sobre solicitudes están en solicitudes/tests.py.
+# =====================================================================
+class NovedadDonanteTests(BaseDonacionTest):
+    url = "/api/novedades/"
+
+    def setUp(self):
+        super().setUp()
+        self.d = self.crear_en_bd(estado="Validada", alimentos=2)
+        self.a1, self.a2 = self.d.alimentos.order_by("id")
+
+    def crear_novedad(self, donacion=None, alimento=None, descripcion="Se dañó por la lluvia", cliente=None):
+        datos = {"donacion": (donacion or self.d).pk, "descripcion": descripcion}
+        if alimento is not None:
+            datos["donacion_alimento"] = alimento.pk
+        return (cliente or self.cliente).post(self.url, datos, format="json")
+
+    def test_crea_sobre_un_alimento_y_notifica_a_los_administradores(self):
+        otro_admin = crear_admin("admin2@k.com", "2")
+        r = self.crear_novedad(alimento=self.a1)
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual((r.data["estado"], r.data["donacion_alimento"]), ("Pendiente", self.a1.pk))
+        self.assertEqual(r.data["alimento_nombre"], self.a1.nombre)
+        notificaciones = Notificacion.objects.filter(tipo="novedad_creada")
+        self.assertEqual({n.usuario_id for n in notificaciones}, {self.admin.pk, otro_admin.pk})
+        self.assertIn("Se dañó por la lluvia", notificaciones.first().mensaje)
+
+    def test_crea_sobre_toda_la_donacion(self):
+        r = self.crear_novedad()
+        self.assertEqual(r.status_code, 201)
+        self.assertIsNone(r.data["donacion_alimento"])
+        self.assertIsNone(r.data["alimento_nombre"])
+
+    def test_tambien_sobre_donacion_agotada(self):
+        Donacion.objects.filter(pk=self.d.pk).update(estado="Agotada")
+        self.assertEqual(self.crear_novedad().status_code, 201)
+
+    def test_solo_validada_o_agotada(self):
+        for estado in ("Pendiente", "Rechazada", "Finalizada"):
+            with self.subTest(estado=estado):
+                d = self.crear_en_bd(estado=estado)
+                r = self.crear_novedad(donacion=d)
+                self.assertEqual(r.status_code, 400)
+                self.assertIn("donacion", r.data)
+
+    def test_solo_sobre_donaciones_propias(self):
+        ajena = self.crear_en_bd(donante=self.otro_donante, estado="Validada")
+        self.assertEqual(self.crear_novedad(donacion=ajena).status_code, 404)
+
+    def test_el_alimento_debe_ser_de_esa_donacion_y_estar_activo(self):
+        otra = self.crear_en_bd(estado="Validada")
+        r = self.crear_novedad(alimento=otra.alimentos.get())
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("no pertenece", str(r.data))
+        DonacionAlimento.objects.filter(pk=self.a2.pk).update(activo=False)
+        r = self.crear_novedad(alimento=self.a2)
+        self.assertIn("ya fue retirado", str(r.data))
+
+    def test_maximo_una_pendiente_por_alimento_y_una_general(self):
+        self.assertEqual(self.crear_novedad(alimento=self.a1).status_code, 201)
+        r = self.crear_novedad(alimento=self.a1)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("este alimento", str(r.data))
+        # Otro alimento y una general sí se permiten.
+        self.assertEqual(self.crear_novedad(alimento=self.a2).status_code, 201)
+        self.assertEqual(self.crear_novedad().status_code, 201)
+        r = self.crear_novedad()
+        self.assertIn("toda la donación", str(r.data))
+        # Resuelta la anterior, puede reportar otra sobre el mismo alimento.
+        Novedad.objects.filter(donacion_alimento=self.a1).update(estado="Rechazada")
+        self.assertEqual(self.crear_novedad(alimento=self.a1).status_code, 201)
+
+    def test_descripcion_obligatoria(self):
+        r = self.crear_novedad(descripcion="  ")
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data["descripcion"], ["Describe qué pasó con los alimentos."])
+
+    def test_lista_solo_las_propias(self):
+        self.crear_novedad()
+        ajena = self.crear_en_bd(donante=self.otro_donante, estado="Validada")
+        Novedad.objects.create(donante=self.otro_donante, donacion=ajena, descripcion="x")
+        r = self.cliente.get(self.url)
+        self.assertEqual(r.data["count"], 1)
+        self.assertEqual(self.cliente.get(self.url, {"estado": "Aceptada"}).data["count"], 0)
+
+    def test_solo_donantes(self):
+        self.assertEqual(self.crear_novedad(cliente=cliente_de(self.beneficiario)).status_code, 403)
+
+    def test_rn14_lo_afectado_deja_de_mostrarse(self):
+        cliente_b = cliente_de(self.beneficiario)
+        visibles = lambda: {a["id"] for a in cliente_b.get("/api/alimentos-disponibles/").data["results"]}
+        self.assertEqual(visibles(), {self.a1.pk, self.a2.pk})
+        self.crear_novedad(alimento=self.a1)
+        self.assertEqual(visibles(), {self.a2.pk})
+        self.crear_novedad()
+        self.assertEqual(visibles(), set())
+
+
+class AdminNovedadTests(BaseDonacionTest):
+    url = "/api/admin/novedades/"
+
+    def setUp(self):
+        super().setUp()
+        self.d = self.crear_en_bd(estado="Validada")
+        self.novedad = Novedad.objects.create(donante=self.donante, donacion=self.d, descripcion="x")
+
+    def test_solo_administradores(self):
+        self.assertEqual(self.cliente.get(self.url).status_code, 403)
+
+    def test_filtros_y_detalle(self):
+        otra = self.crear_en_bd(donante=self.otro_donante, estado="Validada")
+        Novedad.objects.create(donante=self.otro_donante, donacion=otra, descripcion="y", estado="Rechazada", respuesta_admin="no")
+        self.assertEqual(self.cliente_admin.get(self.url).data["count"], 2)
+        self.assertEqual(self.cliente_admin.get(self.url, {"estado": "Pendiente"}).data["count"], 1)
+        self.assertEqual(self.cliente_admin.get(self.url, {"donacion": otra.pk}).data["count"], 1)
+        self.assertEqual(self.cliente_admin.get(self.url, {"donante": self.donante.pk}).data["count"], 1)
+        r = self.cliente_admin.get(f"{self.url}{self.novedad.pk}/")
+        self.assertEqual(r.data["donante"]["correo"], "dona@k.com")
+        self.assertEqual(r.data["solicitudes_afectadas"], 0)
+
+    def test_rechazar_exige_respuesta(self):
+        for datos in ({}, {"respuesta_admin": " "}):
+            r = self.cliente_admin.post(f"{self.url}{self.novedad.pk}/rechazar/", datos, format="json")
+            self.assertEqual(r.status_code, 400)
+            self.assertEqual(r.data["respuesta_admin"], ["Debes indicar la respuesta al donante."])
+
+    def test_solo_se_revisan_pendientes(self):
+        Novedad.objects.filter(pk=self.novedad.pk).update(estado="Aceptada")
+        r = self.cliente_admin.post(f"{self.url}{self.novedad.pk}/aceptar/", {}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("ya fue revisada", str(r.data))
+        r = self.cliente_admin.post(f"{self.url}{self.novedad.pk}/rechazar/", {"respuesta_admin": "x"}, format="json")
+        self.assertEqual(r.status_code, 400)
