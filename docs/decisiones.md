@@ -167,3 +167,20 @@ schtasks /Create /SC HOURLY /TN "Kumora - procesar vencimientos" ^
 ```
 
 En los dos casos el resumen y los errores quedan en `logs/vencimientos.log`. Si aparece "Errores: N", se revisa el detalle en ese archivo y se vuelve a ejecutar: lo que ya se procesó no se repite.
+
+## Paso 12 — Dashboard (RN-60, RN-61)
+
+- **Sin modelos, solo consultas.** Todo sale de agregaciones de la base (`Count`, `Sum`, `annotate`, `aggregate`). No se recorren los registros en Python: Python solo arma la lista de los 12 meses y rellena con 0.
+- **Pocas consultas y siempre las mismas.** El dashboard del administrador hace unas 12 consultas: 4 de vencimientos, 2 de totales, 5 series por mes (una por cada serie) y 1 por categoría. El número **no crece con los datos**; una prueba lo comprueba comparando el conteo con 1 y con varias entregas.
+- **Qué es cada número (RN-60).**
+  - "Donaciones recibidas": `Validada`, `Agotada` o `Finalizada`. Una `Pendiente` aún no se revisa y una `Rechazada` nunca se recibió.
+  - "Personas beneficiadas": beneficiarios **distintos** con al menos una solicitud `Entregada`.
+  - Los totales son históricos (desde siempre).
+- **"Alimentos entregados"** son los detalles no cancelados de solicitudes `Entregada`. La entrega es total (RN-26), así que cada detalle cuenta como un alimento entregado. Los detalles cancelados por una novedad no cuentan.
+- **Las series cuentan, no suman cantidades.** Por mes se cuentan donaciones recibidas, solicitudes enviadas (en cualquier estado), entregas, alimentos donados y alimentos entregados. El donante tiene las mismas series, salvo "solicitudes".
+- **Cantidades del donante agrupadas por unidad (RN-61).** `cantidades_entregadas` da, por cada `unidad_medida`, cuántos alimentos y qué cantidad total se entregó. Así 2,5 kg de arroz y 1 kg de panela suman 3,5 kg, pero nunca se suman con litros ni con unidades.
+- **Meses en hora de Bogotá.** Se agrupa en la base con `TruncMonth(..., tzinfo=America/Bogota)`, que en MySQL usa `CONVERT_TZ`. Una donación del 1.º a las 03:00 UTC (22:00 del día anterior en Colombia) cuenta en el mes anterior. Esto requiere que MySQL tenga cargadas las zonas horarias; se comprobó que el servicio de Aiven las tiene.
+- **Últimos 12 meses con ceros.** La serie siempre trae 12 meses, del más viejo al actual, en formato `AAAA-MM`. Los meses sin datos van en 0 para que la gráfica no tenga huecos. Lo anterior a esos 12 meses no sale en la serie, pero sí en los totales.
+- **Por categoría: histórico y solo las que tienen datos.** Una sola consulta da por categoría los alimentos donados (en donaciones recibidas) y los entregados. Se omiten las categorías sin alimentos donados, para no llenar la gráfica de ceros. Van de la que tiene más alimentos donados a la que menos.
+- **Datos al día.** Antes de calcular se aplican los vencimientos pendientes con las mismas funciones eficientes del Paso 11: todo para el administrador y solo lo suyo para el donante. Si nada está vencido, eso cuesta 4 consultas.
+- **Solo sus datos.** `dashboard/donante/` filtra todo por el donante del token. `dashboard/admin/` es solo para administradores. Cada rol recibe 403 en el dashboard del otro.

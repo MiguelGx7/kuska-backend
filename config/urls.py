@@ -10,6 +10,7 @@ urlpatterns = [
     path("api/", include("apps.solicitudes.urls")),
     path("api/", include("apps.sanciones.urls")),
     path("api/", include("apps.notificaciones.urls")),
+    path("api/", include("apps.dashboard.urls")),
 ]
 
 # Swagger solo en desarrollo (DEBUG = True).
