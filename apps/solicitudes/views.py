@@ -115,7 +115,7 @@ class EnviarCarritoView(APIView):
 
 
 @extend_schema_view(
-    list=extend_schema(summary="Mis solicitudes", description="Filtro: estado. Búsqueda por código de pedido."),
+    list=extend_schema(summary="Mis solicitudes", description="Filtro: estado. Búsqueda por código de pedido. Antes de listar aplica los vencimientos (RN-50) a los registros que estén vencidos."),
     retrieve=extend_schema(summary="Ver una de mis solicitudes"),
 )
 @extend_schema(tags=["Beneficiario - Solicitudes"])
@@ -133,6 +133,11 @@ class MisSolicitudesViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vi
         return _solicitudes_con_detalle(
             Solicitud.objects.filter(beneficiario=self.request.user).order_by("-fecha_solicitud", "-id")
         )
+
+    def list(self, request, *args, **kwargs):
+        # RN-50: antes de listar, solo las suyas que de verdad estén vencidas.
+        services.procesar_solicitudes_vencidas(Solicitud.objects.filter(beneficiario=request.user))
+        return super().list(request, *args, **kwargs)
 
     @extend_schema(
         summary="Cancelar mi solicitud (RN-23)",
@@ -156,6 +161,7 @@ class MisSolicitudesViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vi
         description=(
             "Filtros: estado, codigo_pedido, beneficiario (id) y donacion (id). "
             "Búsqueda por código, correo o documento del beneficiario."
+            " Antes de listar aplica los vencimientos (RN-50) a los registros que estén vencidos."
         ),
     ),
     retrieve=extend_schema(summary="Ver una solicitud"),
@@ -174,6 +180,11 @@ class AdminSolicitudViewSet(viewsets.ReadOnlyModelViewSet):
                 "beneficiario", "gestionada_por", "entrega__registrada_por"
             ).order_by("-fecha_solicitud", "-id")
         )
+
+    def list(self, request, *args, **kwargs):
+        # RN-50: solo las que de verdad están vencidas (una consulta las encuentra).
+        services.procesar_solicitudes_vencidas(Solicitud.objects.all())
+        return super().list(request, *args, **kwargs)
 
     def _respuesta(self, solicitud_id):
         return Response(AdminSolicitudSerializer(self.get_queryset().get(pk=solicitud_id)).data)

@@ -231,5 +231,6 @@ SPECTACULAR_SETTINGS = {
         "ModalidadDonacionEnum": "apps.donaciones.models.Donacion.ModalidadEntrega",
         "ModalidadSolicitudEnum": "apps.solicitudes.models.Solicitud.ModalidadEntrega",
         "TipoSancionEnum": "apps.sanciones.models.Sancion.Tipo",
+        "TipoNotificacionEnum": "apps.notificaciones.models.Notificacion.Tipo",
     },
 }

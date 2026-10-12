@@ -43,3 +43,29 @@ def notificar_administradores(tipo, titulo, mensaje, donacion=None, solicitud=No
     return Notificacion.objects.bulk_create(
         [_nueva(admin, tipo, titulo, mensaje, donacion, solicitud) for admin in administradores]
     )
+
+
+# ---------------------------------------------------------------------
+# Consultar y marcar como leídas (RN-41)
+# ---------------------------------------------------------------------
+def notificaciones_de(usuario):
+    """Solo las del usuario, de la más nueva a la más vieja."""
+    return Notificacion.objects.filter(usuario=usuario).order_by("-fecha", "-id")
+
+
+def contar_no_leidas(usuario):
+    return Notificacion.objects.filter(usuario=usuario, leida=False).count()
+
+
+def marcar_leida(usuario, notificacion_id):
+    """Si no existe o es de otro usuario, None (la vista responde 404)."""
+    notificacion = notificaciones_de(usuario).filter(pk=notificacion_id).first()
+    if notificacion and not notificacion.leida:
+        notificacion.leida = True
+        notificacion.save(update_fields=["leida"])
+    return notificacion
+
+
+def marcar_todas_leidas(usuario):
+    """Devuelve cuántas cambiaron (las ya leídas no cuentan)."""
+    return Notificacion.objects.filter(usuario=usuario, leida=False).update(leida=True)

@@ -3,14 +3,16 @@ Lógica de negocio del carrito, las solicitudes y las entregas
 (RN-20 a RN-28, RN-15, RN-31 parcial).
 
 Orden de bloqueos (regla 6, para evitar bloqueos cruzados entre peticiones):
-usuario -> solicitud -> alimentos (por id) -> configuración -> donación.
+usuario -> sanción -> novedad -> solicitud -> alimentos (por id) ->
+configuración -> donación.
 """
 
+import logging
 from collections import OrderedDict
 from datetime import datetime, time, timedelta
 
 from django.db import IntegrityError, transaction
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from django.db.models.functions import Length
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, ValidationError
@@ -27,6 +29,8 @@ from apps.notificaciones.services import crear_notificacion, notificar_administr
 from apps.usuarios.models import Usuario
 
 from .models import CarritoItem, DetalleSolicitud, Entrega, Solicitud
+
+logger = logging.getLogger(__name__)
 
 MENSAJE_SOLICITUD_EN_CURSO = (
     "Ya tienes una solicitud en curso de esta donación. Cuando termine podrás pedir de nuevo."
@@ -238,6 +242,11 @@ def enviar_carrito(beneficiario, elecciones):
     Crea una solicitud por donación con el mismo codigo_pedido, reserva las
     cantidades y vacía el carrito. Si algo falla, no crea nada.
     """
+    # RN-50: antes de contar sus solicitudes en curso, se aplican sus vencimientos
+    # (una Aprobada vencida pasa a No recogida y deja de ocupar un cupo).
+    procesar_solicitudes_vencidas(
+        Solicitud.objects.filter(beneficiario=beneficiario, estado__in=Solicitud.ESTADOS_EN_CURSO)
+    )
     with transaction.atomic():
         # Turno por beneficiario: dos envíos suyos al tiempo no pasan juntos el límite.
         Usuario.objects.select_for_update().get(pk=beneficiario.pk)
@@ -541,10 +550,80 @@ def aplicar_vencimientos(solicitud_id):
     Aplica RN-27 y RN-28 a una solicitud en su PROPIA transacción, para que
     el cambio quede guardado aunque la acción que sigue (aprobar, rechazar
     o entregar) termine en error.
+    Devuelve el nuevo estado (No recogida o Cancelada) o None si no cambió.
     """
     with transaction.atomic():
         solicitud = _bloquear_solicitud(solicitud_id)
-        return marcar_no_recogida_si_vencida(solicitud) or cancelar_si_pendiente_vencida(solicitud)
+        if marcar_no_recogida_si_vencida(solicitud):
+            return Solicitud.Estado.NO_RECOGIDA
+        if cancelar_si_pendiente_vencida(solicitud):
+            return Solicitud.Estado.CANCELADA
+        return None
+
+
+def ids_solicitudes_vencidas(queryset):
+    """
+    De `queryset`, los ids de las solicitudes que RN-27 o RN-28 cambiarían
+    ahora, en UNA consulta (subconsultas EXISTS), para no revisar una por una:
+    - Pendiente con algún detalle no cancelado cuyo vencimiento − margen ya
+      pasó (equivale a fecha_vencimiento < hoy + margen).
+    - Aprobada con fecha_limite_recogida vencida y sin novedad Pendiente (RN-31).
+    """
+    hoy_mas_margen = timezone.localdate() + timedelta(
+        days=Configuracion.objects.get(pk=1).margen_vencimiento_dias
+    )
+    detalles = DetalleSolicitud.objects.filter(solicitud=OuterRef("pk"), cancelado=False)
+    return list(
+        queryset.annotate(
+            _alimento_vencido=Exists(
+                detalles.filter(donacion_alimento__fecha_vencimiento__lt=hoy_mas_margen)
+            ),
+            _novedad_alimento=Exists(
+                detalles.filter(donacion_alimento__novedades__estado=Novedad.Estado.PENDIENTE)
+            ),
+            _novedad_general=Exists(
+                Novedad.objects.filter(
+                    estado=Novedad.Estado.PENDIENTE,
+                    donacion=OuterRef("donacion"),
+                    donacion_alimento__isnull=True,
+                )
+            ),
+        )
+        .filter(
+            Q(estado=Solicitud.Estado.PENDIENTE, _alimento_vencido=True)
+            | Q(
+                estado=Solicitud.Estado.APROBADA,
+                fecha_limite_recogida__lt=timezone.now(),
+                _novedad_alimento=False,
+                _novedad_general=False,
+            )
+        )
+        .order_by("id")
+        .values_list("id", flat=True)
+    )
+
+
+def procesar_solicitudes_vencidas(queryset):
+    """
+    RN-50: aplica RN-27/RN-28 solo a las solicitudes de `queryset` que de
+    verdad están vencidas. Cada una en su propia transacción: si una falla,
+    se registra en el log y se sigue con las demás. Repetirlo no hace nada
+    doble, porque cada función vuelve a revisar el estado con la fila
+    bloqueada. Devuelve los conteos.
+    """
+    conteos = {"no_recogidas": 0, "canceladas": 0, "errores": 0}
+    for solicitud_id in ids_solicitudes_vencidas(queryset):
+        try:
+            nuevo = aplicar_vencimientos(solicitud_id)
+        except Exception:
+            logger.exception("No se pudo aplicar el vencimiento a la solicitud %s", solicitud_id)
+            conteos["errores"] += 1
+            continue
+        if nuevo == Solicitud.Estado.NO_RECOGIDA:
+            conteos["no_recogidas"] += 1
+        elif nuevo == Solicitud.Estado.CANCELADA:
+            conteos["canceladas"] += 1
+    return conteos
 
 
 def _exigir_estado(solicitud, estado, accion):

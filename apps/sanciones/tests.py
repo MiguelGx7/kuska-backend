@@ -2,8 +2,10 @@
 
 from datetime import timedelta
 from decimal import Decimal
+from io import StringIO
 
 from django.core.cache import cache
+from django.core.management import call_command
 from django.utils import timezone
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -449,3 +451,46 @@ class EstadoYVencimientoTests(BaseSancionTest):
         r = self.sancionar(self.beneficiario, "Bloqueo permanente", motivo="Reincidió")
         self.assertEqual(r.status_code, 201, r.data)
         self.assertEqual(self.estado(self.beneficiario), "Bloqueado")
+
+
+# =====================================================================
+# Paso 11: el comando levanta los bloqueos vencidos (RN-50, RN-03, RN-77)
+# =====================================================================
+class LevantarBloqueosVencidosTests(BaseSancionTest):
+    def comando(self):
+        salida = StringIO()
+        call_command("procesar_vencimientos", stdout=salida, stderr=StringIO())
+        return salida.getvalue()
+
+    def vencer_bloqueo(self, usuario):
+        pasado = timezone.now() - timedelta(minutes=1)
+        Sancion.objects.filter(usuario=usuario, tipo="Bloqueo temporal").update(fecha_fin=pasado)
+        Usuario.objects.filter(pk=usuario.pk).update(bloqueado_hasta=pasado)
+
+    def test_bloqueado_vencido_pasa_a_activo_aunque_no_entre(self):
+        self.sancionar(self.donante, "Bloqueo temporal")
+        self.vencer_bloqueo(self.donante)
+        self.assertEqual(self.visibles(), set())
+        salida = self.comando()
+        self.assertIn("Usuarios desbloqueados (RN-03, RN-77): 1", salida)
+        self.donante.refresh_from_db()
+        self.assertEqual((self.donante.estado, self.donante.bloqueado_hasta), ("Activo", None))
+        self.assertFalse(Sancion.objects.get().vigente)
+        self.assertEqual(len(self.visibles()), 4)  # RN-77
+        self.assertIn("Usuarios desbloqueados (RN-03, RN-77): 0", self.comando())  # sin efectos dobles
+
+    def test_inactivo_solo_cierra_la_sancion(self):
+        self.sancionar(self.beneficiario, "Bloqueo temporal")
+        self.inactivar(self.beneficiario)
+        self.vencer_bloqueo(self.beneficiario)
+        salida = self.comando()
+        self.assertIn("cerradas sin cambiar el estado (p. ej. inactivos): 1", salida)
+        self.assertEqual(self.estado(self.beneficiario), "Inactivo")
+        self.assertFalse(Sancion.objects.get().vigente)
+
+    def test_no_toca_bloqueos_vigentes_ni_permanentes(self):
+        self.sancionar(self.beneficiario, "Bloqueo temporal")
+        self.sancionar(self.donante, "Bloqueo permanente")
+        self.assertIn("Usuarios desbloqueados (RN-03, RN-77): 0", self.comando())
+        self.assertEqual((self.estado(self.beneficiario), self.estado(self.donante)), ("Bloqueado", "Bloqueado"))
+        self.assertEqual(Sancion.objects.filter(vigente=True).count(), 2)

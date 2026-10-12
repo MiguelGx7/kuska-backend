@@ -496,6 +496,63 @@ def recalcular_estado_donacion(donacion):
     return donacion
 
 
+def ids_donaciones_desactualizadas(queryset):
+    """
+    De `queryset`, los ids de las donaciones cuyo estado ya no coincide con
+    RN-16 (por ejemplo, porque un alimento venció), en UNA consulta:
+    - Validada sin ningún alimento con disponibilidad.
+    - Agotada con algún alimento con disponibilidad, o sin solicitudes en curso.
+    """
+    minima = fecha_minima_vencimiento(Configuracion.objects.get(pk=1))
+    return list(
+        queryset.annotate(
+            _con_disponibilidad=Exists(
+                DonacionAlimento.objects.filter(
+                    donacion=OuterRef("pk"),
+                    activo=True,
+                    cantidad_disponible__gt=0,
+                    fecha_vencimiento__gt=minima,
+                )
+            ),
+            _con_solicitudes=Exists(
+                Solicitud.objects.filter(donacion=OuterRef("pk"), estado__in=Solicitud.ESTADOS_EN_CURSO)
+            ),
+        )
+        .filter(
+            Q(estado=Donacion.Estado.VALIDADA, _con_disponibilidad=False)
+            | Q(estado=Donacion.Estado.AGOTADA, _con_disponibilidad=True)
+            | Q(estado=Donacion.Estado.AGOTADA, _con_solicitudes=False)
+        )
+        .order_by("id")
+        .values_list("id", flat=True)
+    )
+
+
+def procesar_donaciones_desactualizadas(queryset):
+    """
+    RN-50/RN-16: recalcula solo las donaciones de `queryset` que lo necesitan,
+    cada una en su propia transacción (un error no detiene las demás).
+    Devuelve cuántas quedaron en cada estado nuevo.
+    """
+    conteos = {"validadas": 0, "agotadas": 0, "finalizadas": 0, "errores": 0}
+    clave = {
+        Donacion.Estado.VALIDADA: "validadas",
+        Donacion.Estado.AGOTADA: "agotadas",
+        Donacion.Estado.FINALIZADA: "finalizadas",
+    }
+    for donacion_id in ids_donaciones_desactualizadas(queryset):
+        try:
+            antes = Donacion.objects.values_list("estado", flat=True).get(pk=donacion_id)
+            donacion = recalcular_estado_donacion(Donacion(pk=donacion_id))
+        except Exception:
+            logger.exception("No se pudo recalcular la donación %s", donacion_id)
+            conteos["errores"] += 1
+            continue
+        if donacion.estado != antes:
+            conteos[clave[donacion.estado]] += 1
+    return conteos
+
+
 # =====================================================================
 # Novedades (RN-30 a RN-33), Paso 8
 # Orden de bloqueos (regla 6): usuario -> novedad -> solicitud ->

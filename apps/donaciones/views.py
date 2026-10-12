@@ -8,6 +8,7 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
 from apps.solicitudes import services as servicios_solicitudes
+from apps.solicitudes.models import Solicitud
 from apps.solicitudes.serializers import AlimentoConSolicitudesSerializer
 from apps.usuarios.permissions import PERMISOS_ADMIN, PERMISOS_BENEFICIARIO, PERMISOS_DONANTE
 
@@ -39,6 +40,16 @@ def _con_alimentos(queryset):
     return queryset.prefetch_related(Prefetch("alimentos", queryset=alimentos))
 
 
+def _poner_al_dia(solicitudes, donaciones):
+    """
+    RN-50 antes de listar: aplica RN-27/RN-28 y RN-16 solo a los registros de
+    estos querysets que de verdad estén vencidos o desactualizados. Primero las
+    solicitudes, porque devolver cantidades puede cambiar la donación.
+    """
+    servicios_solicitudes.procesar_solicitudes_vencidas(solicitudes)
+    services.procesar_donaciones_desactualizadas(donaciones)
+
+
 def _fotos_de(request):
     """{indice: archivo} con los campos foto_0, foto_1... del multipart."""
     return {
@@ -52,7 +63,7 @@ def _fotos_de(request):
 # Donante
 # ---------------------------------------------------------------------
 @extend_schema_view(
-    list=extend_schema(summary="Mis donaciones", description="Filtro: estado."),
+    list=extend_schema(summary="Mis donaciones", description="Filtro: estado. Antes de listar aplica los vencimientos (RN-50) a los registros que estén vencidos."),
     retrieve=extend_schema(summary="Ver una de mis donaciones"),
     destroy=extend_schema(
         summary="Eliminar mi donación (solo Pendiente)",
@@ -82,6 +93,13 @@ class DonacionDonanteViewSet(
         return _con_alimentos(
             Donacion.objects.filter(donante=self.request.user).order_by("-fecha_registro")
         )
+
+    def list(self, request, *args, **kwargs):
+        _poner_al_dia(
+            Solicitud.objects.filter(donacion__donante=request.user),
+            Donacion.objects.filter(donante=request.user),
+        )
+        return super().list(request, *args, **kwargs)
 
     def _respuesta(self, donacion_id, codigo=status.HTTP_200_OK):
         donacion = self.get_queryset().get(pk=donacion_id)
@@ -152,13 +170,14 @@ class DonacionDonanteViewSet(
         description=(
             "Quién pidió, cuánto y en qué estado, por cada alimento. Teléfono y dirección del "
             "beneficiario solo si la solicitud está Aprobada, Entregada o No recogida. "
-            "Con el id de la solicitud se registra la entrega en solicitudes/{id}/entregar/."
+            "Con el id de la solicitud se registra la entrega en solicitudes/{id}/entregar/. Antes de listar aplica los vencimientos (RN-50) a los registros que estén vencidos."
         ),
         responses={200: AlimentoConSolicitudesSerializer(many=True)},
     )
     @action(detail=True, methods=["get"], url_path="solicitudes-recibidas", pagination_class=None)
     def solicitudes_recibidas(self, request, pk=None):
         donacion = self.get_object()
+        _poner_al_dia(Solicitud.objects.filter(donacion=donacion), Donacion.objects.filter(pk=donacion.pk))
         datos = servicios_solicitudes.solicitudes_recibidas(donacion)
         return Response(AlimentoConSolicitudesSerializer(datos, many=True).data)
 
@@ -169,7 +188,7 @@ class DonacionDonanteViewSet(
 @extend_schema_view(
     list=extend_schema(
         summary="Listar donaciones",
-        description="Filtros: estado y donante (id). Búsqueda por título o correo del donante.",
+        description="Filtros: estado y donante (id). Búsqueda por título o correo del donante. Antes de listar aplica los vencimientos (RN-50) a los registros que estén vencidos.",
     ),
     retrieve=extend_schema(summary="Ver una donación con sus fotos"),
 )
@@ -185,6 +204,10 @@ class AdminDonacionViewSet(viewsets.ReadOnlyModelViewSet):
         return _con_alimentos(
             Donacion.objects.select_related("donante", "revisada_por").order_by("-fecha_registro")
         )
+
+    def list(self, request, *args, **kwargs):
+        _poner_al_dia(Solicitud.objects.all(), Donacion.objects.all())
+        return super().list(request, *args, **kwargs)
 
     def _respuesta(self, donacion_id):
         return Response(AdminDonacionSerializer(self.get_queryset().get(pk=donacion_id)).data)

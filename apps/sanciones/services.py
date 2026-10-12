@@ -10,6 +10,7 @@ La cascada (RN-70 a RN-73) y el impacto (RN-74) salen de la misma función,
 que ve el administrador coincide con lo que pasa.
 """
 
+import logging
 from datetime import timedelta
 
 from django.db import transaction
@@ -26,6 +27,8 @@ from apps.usuarios.models import Rol, Usuario
 from apps.usuarios.services import desbloquear_si_vencido, invalidar_refresh_tokens
 
 from .models import Sancion
+
+logger = logging.getLogger(__name__)
 
 DIAS_BLOQUEO_TEMPORAL = 7
 
@@ -541,3 +544,60 @@ def crear_sancion(admin, usuario_id, tipo, motivo, donacion_id=None, solicitud_i
         )
     sancion.efectos = conteos
     return sancion
+
+
+# ---------------------------------------------------------------------
+# Bloqueos temporales vencidos (RN-50 con RN-03 y RN-77)
+# ---------------------------------------------------------------------
+def levantar_bloqueos_vencidos():
+    """
+    - Bloqueado con bloqueado_hasta vencido: pasa a Activo y su temporal queda
+      vigente = 0 (misma función que el login, RN-03). Sus alimentos vuelven a
+      mostrarse solos (RN-77), porque RN-14 solo exige que el donante esté Activo.
+    - Inactivo (o Activo) con un temporal vencido aún vigente: solo se marca
+      vigente = 0; el estado no cambia.
+    Cada usuario en su propia transacción. Devuelve los conteos.
+    """
+    conteos = {"desbloqueados": 0, "sanciones_cerradas": 0, "errores": 0}
+    ahora = timezone.now()
+
+    bloqueados = Usuario.objects.filter(
+        estado=Usuario.Estado.BLOQUEADO, bloqueado_hasta__isnull=False, bloqueado_hasta__lte=ahora
+    ).order_by("id")
+    for usuario in bloqueados:
+        try:
+            desbloquear_si_vencido(usuario)
+        except Exception:
+            logger.exception("No se pudo levantar el bloqueo del usuario %s", usuario.pk)
+            conteos["errores"] += 1
+            continue
+        if usuario.estado == Usuario.Estado.ACTIVO:
+            conteos["desbloqueados"] += 1
+
+    # Los Bloqueado se dejan a la parte de arriba: si allí falló uno, no se le
+    # cierra la sanción dejándolo bloqueado sin motivo.
+    pendientes = (
+        Sancion.objects.filter(
+            tipo=Sancion.Tipo.BLOQUEO_TEMPORAL, vigente=True, fecha_fin__lte=ahora
+        )
+        .exclude(usuario__estado=Usuario.Estado.BLOQUEADO)
+        .values_list("usuario_id", flat=True)
+        .distinct()
+    )
+    for usuario_id in sorted(set(pendientes)):
+        try:
+            with transaction.atomic():
+                # Regla 6: usuario -> sanción.
+                usuario = Usuario.objects.select_for_update().get(pk=usuario_id)
+                if usuario.estado == Usuario.Estado.BLOQUEADO:
+                    continue
+                conteos["sanciones_cerradas"] += Sancion.objects.filter(
+                    usuario=usuario,
+                    tipo=Sancion.Tipo.BLOQUEO_TEMPORAL,
+                    vigente=True,
+                    fecha_fin__lte=ahora,
+                ).update(vigente=False)
+        except Exception:
+            logger.exception("No se pudo cerrar la sanción vencida del usuario %s", usuario_id)
+            conteos["errores"] += 1
+    return conteos

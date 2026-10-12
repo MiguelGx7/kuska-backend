@@ -1,18 +1,23 @@
-"""Pruebas del Paso 6: carrito y envío de solicitudes (RN-20 a RN-23, RN-29)."""
+"""Pruebas de los Pasos 6 a 8 y 11: carrito, solicitudes, entregas, novedades y vencimientos."""
 
 from datetime import timedelta
 from decimal import Decimal
+from io import StringIO
+from unittest import mock
 
+from django.core.management import call_command
 from django.db.models import F
 from django.utils import timezone
 
 from apps.catalogo.models import Configuracion
 from apps.donaciones.models import Donacion, DonacionAlimento, Novedad
+from apps.donaciones.services import procesar_donaciones_desactualizadas
 from apps.donaciones.tests import BaseDonacionTest
 from apps.notificaciones.models import Notificacion
 from apps.usuarios.models import Rol, Usuario
 from apps.usuarios.tests import cliente_de, crear_admin, crear_usuario
 
+from . import services as servicios
 from .models import CarritoItem, DetalleSolicitud, Entrega, Solicitud
 from .services import (
     MOTIVO_PENDIENTE_VENCIDA,
@@ -877,3 +882,156 @@ class RechazarNovedadTests(BaseNovedadTest):
         self.assertEqual(self.accion(s, "aprobar").status_code, 400)
         self.rechazar(n)
         self.assertEqual(self.accion(s, "aprobar").status_code, 200)
+
+
+# =====================================================================
+# Paso 11: vencimientos automáticos (RN-50)
+# =====================================================================
+class BaseVencimientoTest(BaseGestionTest):
+    def aprobada_vencida(self, donacion, alimento, codigo="KUM-20261012-0001"):
+        return self.crear_solicitud(donacion, [(alimento, "1")], estado="Aprobada",
+                                    limite=timezone.now() - timedelta(hours=1), codigo=codigo)
+
+    def pendiente_vencida(self, donacion, alimento, codigo="KUM-20261012-0002"):
+        s = self.crear_solicitud(donacion, [(alimento, "1")], codigo=codigo)
+        self.vencer(alimento, 0)  # vence hoy: hoy − margen ya pasó
+        return s
+
+    def comando(self):
+        salida = StringIO()
+        call_command("procesar_vencimientos", stdout=salida, stderr=StringIO())
+        return salida.getvalue()
+
+    def estado(self, obj):
+        obj.refresh_from_db()
+        return obj.estado
+
+
+class ProcesarVencimientosComandoTests(BaseVencimientoTest):
+    def test_aplica_todo_e_imprime_el_resumen(self):
+        no_recogida = self.aprobada_vencida(self.d1, self.arroz)
+        cancelada = self.pendiente_vencida(self.d2, self.panela)
+        vigente = self.crear_solicitud(self.d1, [(self.leche, "1")], estado="Aprobada",
+                                       limite=timezone.now() + timedelta(days=1), codigo="KUM-20261012-0003")
+        self.vencer(self.frijol, 0)  # d3 sin solicitudes y con su único alimento vencido
+
+        salida = self.comando()
+        self.assertEqual(self.estado(no_recogida), "No recogida")
+        self.assertEqual(self.estado(cancelada), "Cancelada")
+        self.assertEqual(self.estado(vigente), "Aprobada")
+        self.assertEqual(self.estado(self.d3), "Finalizada")
+        self.assertEqual(self.estado(self.d1), "Validada")
+        self.assertIn("Aprobada -> No recogida (RN-27): 1", salida)
+        self.assertIn("Pendiente -> Cancelada (RN-28): 1", salida)
+        self.assertIn("Errores: 0", salida)
+        self.assertTrue(self.notificaciones("solicitud_no_recogida", self.beneficiario).exists())
+
+    def test_se_puede_ejecutar_varias_veces_sin_efectos_dobles(self):
+        self.aprobada_vencida(self.d1, self.arroz)
+        self.comando()
+        disponible = self.disponible(self.arroz)
+        avisos = Notificacion.objects.count()
+        salida = self.comando()
+        self.assertIn("No recogida (RN-27): 0", salida)
+        self.assertIn("Finalizada (RN-16): 0", salida)
+        self.assertEqual(self.disponible(self.arroz), disponible)
+        self.assertEqual(Notificacion.objects.count(), avisos)
+
+    def test_rn31_con_novedad_pendiente_no_se_marca_no_recogida(self):
+        s = self.aprobada_vencida(self.d1, self.arroz)
+        Novedad.objects.create(donante=self.donante, donacion=self.d1, descripcion="x")
+        self.comando()
+        self.assertEqual(self.estado(s), "Aprobada")
+
+    def test_un_error_en_un_registro_no_detiene_los_demas(self):
+        primera = self.aprobada_vencida(self.d1, self.arroz)
+        segunda = self.aprobada_vencida(self.d2, self.panela, codigo="KUM-20261012-0002")
+        original = servicios.aplicar_vencimientos
+
+        def falla_en_la_primera(solicitud_id):
+            if solicitud_id == primera.pk:
+                raise RuntimeError("falla simulada")
+            return original(solicitud_id)
+
+        with mock.patch("apps.solicitudes.services.aplicar_vencimientos", side_effect=falla_en_la_primera):
+            with self.assertLogs("apps.solicitudes.services", level="ERROR"):
+                salida = self.comando()
+        self.assertEqual(self.estado(primera), "Aprobada")
+        self.assertEqual(self.estado(segunda), "No recogida")
+        self.assertIn("Errores: 1", salida)
+
+    def test_rn16_agotada_sin_solicitudes_en_curso_pasa_a_finalizada(self):
+        DonacionAlimento.objects.filter(donacion=self.d2).update(cantidad_disponible=0)
+        Donacion.objects.filter(pk=self.d2.pk).update(estado="Agotada")
+        salida = self.comando()
+        self.assertEqual(self.estado(self.d2), "Finalizada")
+        self.assertIn("Donaciones -> Finalizada (RN-16): 1", salida)
+
+
+class VencimientosConsultaEficienteTests(BaseVencimientoTest):
+    def test_solo_encuentra_las_realmente_vencidas(self):
+        vencida = self.aprobada_vencida(self.d1, self.arroz)
+        pendiente_vencida = self.pendiente_vencida(self.d2, self.panela)
+        self.crear_solicitud(self.d3, [(self.frijol, "1")], codigo="KUM-20261012-0003")  # vigente
+        self.crear_solicitud(self.d1, [(self.leche, "1")], estado="Entregada", codigo="KUM-20261012-0004")
+        # Un detalle cancelado no cuenta (RN-28 solo mira los no cancelados).
+        self.vencer(self.leche, 0)
+        con_cancelado = self.crear_solicitud(self.d1, [(self.leche, "1")], codigo="KUM-20261012-0005")
+        con_cancelado.detalles.update(cancelado=True)
+        self.assertEqual(
+            servicios.ids_solicitudes_vencidas(Solicitud.objects.all()),
+            sorted([vencida.pk, pendiente_vencida.pk]),
+        )
+
+    def test_sin_vencidas_no_procesa_nada(self):
+        self.crear_solicitud(self.d1, [(self.arroz, "1")])
+        # Una consulta para la configuración y otra para buscar las vencidas.
+        with self.assertNumQueries(2):
+            self.assertEqual(servicios.procesar_solicitudes_vencidas(Solicitud.objects.all())["no_recogidas"], 0)
+        with self.assertNumQueries(2):
+            procesar_donaciones_desactualizadas(Donacion.objects.all())
+
+
+class VencimientosAlListarTests(BaseVencimientoTest):
+    def test_mis_solicitudes(self):
+        s = self.aprobada_vencida(self.d1, self.arroz)
+        r = self.cb.get("/api/mis-solicitudes/")
+        self.assertEqual(r.data["results"][0]["estado"], "No recogida")
+        self.assertEqual(self.estado(s), "No recogida")
+
+    def test_mis_solicitudes_no_toca_las_de_otros(self):
+        otro = crear_usuario("otro_b@k.com", Rol.BENEFICIARIO, "30")
+        s = self.aprobada_vencida(self.d1, self.arroz)
+        Solicitud.objects.filter(pk=s.pk).update(beneficiario=otro)
+        self.cb.get("/api/mis-solicitudes/")
+        self.assertEqual(self.estado(s), "Aprobada")
+
+    def test_admin_solicitudes_con_filtro_de_estado(self):
+        s = self.aprobada_vencida(self.d1, self.arroz)
+        r = self.cliente_admin.get("/api/admin/solicitudes/", {"estado": "Aprobada"})
+        self.assertEqual(r.data["count"], 0)  # ya pasó a No recogida antes de filtrar
+        r = self.cliente_admin.get("/api/admin/solicitudes/", {"estado": "No recogida"})
+        self.assertEqual([x["id"] for x in r.data["results"]], [s.pk])
+
+    def test_donaciones_del_donante_y_admin(self):
+        self.vencer(self.frijol, 0)
+        r = self.cliente.get("/api/donaciones/", {"estado": "Finalizada"})
+        self.assertEqual([d["id"] for d in r.data["results"]], [self.d3.pk])
+        self.vencer(self.panela, 0)
+        r = self.cliente_admin.get("/api/admin/donaciones/", {"estado": "Finalizada"})
+        self.assertEqual(r.data["count"], 2)
+
+    def test_solicitudes_recibidas(self):
+        s = self.pendiente_vencida(self.d2, self.panela)
+        r = self.cliente.get(f"/api/donaciones/{self.d2.pk}/solicitudes-recibidas/")
+        self.assertEqual(r.data[0]["solicitudes"][0]["estado"], "Cancelada")
+        self.assertEqual(self.estado(s), "Cancelada")
+        self.assertEqual(self.estado(self.d2), "Finalizada")
+
+    def test_enviar_carrito_libera_el_cupo_de_una_aprobada_vencida(self):
+        # max_solicitudes_activas = 2: una Aprobada vencida ya no debe ocupar cupo.
+        self.aprobada_vencida(self.d1, self.arroz)
+        self.crear_solicitud(self.d3, [(self.frijol, "1")], codigo="KUM-20261012-0002")
+        self.en_carrito(self.panela, "1")
+        r = self.enviar()
+        self.assertEqual(r.status_code, 201, r.data)

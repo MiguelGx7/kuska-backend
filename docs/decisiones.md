@@ -65,7 +65,7 @@ Registro de las decisiones tomadas en cada paso del backend y su justificación.
 - **Quién registra la entrega.** El administrador en `admin/solicitudes/{id}/entregar/` y el donante dueño en `solicitudes/{id}/entregar/`. A un donante que no es el dueño se le responde 404 (no se revela que la solicitud existe).
 - **Notificación de aprobación completa.** Al beneficiario le llegan la modalidad, la dirección (de recogida o de entrega), la fecha límite y el nombre y teléfono del donante, para que la tenga aunque luego no pueda entrar a la app (RN-70).
 - **Solicitudes recibidas (RN-15).** Se agrupan por alimento e incluyen todos los estados, como historial. La dirección del beneficiario es la de entrega si la modalidad es `Domicilio` y la de su perfil si es `Recoger`; teléfono y dirección solo desde `Aprobada`.
-- **Pendiente para el Paso 11:** el comando `procesar_vencimientos` y la revisión de vencimientos antes de listar.
+- **Comando y revisión antes de listar:** se hicieron en el Paso 11.
 
 ## Paso 8 — Novedades
 
@@ -101,5 +101,69 @@ Registro de las decisiones tomadas en cada paso del backend y su justificación.
 - **Caso límite: usuario con bloqueo permanente.** No se le registran más sanciones, porque es el nivel máximo y definitivo (RN-06).
 - **Bloqueos vencidos.** Antes de sancionar o calcular el impacto se aplica RN-03 (`desbloquear_si_vencido`), para no tratar como bloqueado a quien ya cumplió su bloqueo.
 - **RN-03, RN-75 y RN-77 siguen funcionando con sanciones reales.** Se comprobó con pruebas: login bloqueado con fecha y desbloqueo al vencer; reactivar a un inactivo con bloqueo vigente; y alimentos del donante que vuelven a mostrarse al vencer su bloqueo. No hubo que cambiarlos.
-- **Pendiente para el Paso 11:** levantar los bloqueos vencidos aunque el usuario no entre (RN-50). Hoy se levantan al iniciar sesión, en cualquier petición suya, al reactivarlo o al sancionarlo de nuevo.
+- **Bloqueos vencidos sin que el usuario entre:** se resolvió en el Paso 11 con `procesar_vencimientos` (RN-50). Además se levantan al iniciar sesión, en cualquier petición suya, al reactivarlo o al sancionarlo de nuevo.
 - **Novedades de un donante con bloqueo permanente.** Si tenía una novedad `Pendiente`, queda para que el administrador la resuelva: sus donaciones ya están `Finalizada` y aceptarla o rechazarla no cambia nada más. No se cierra sola porque ninguna regla lo pide.
+
+## Paso 10 — Notificaciones
+
+- **Cada usuario ve solo las suyas** (RN-41). La consulta siempre filtra por el usuario del token. Marcar como leída una ajena responde **404** y no 403, para no revelar que existe. Un id que no es número también da 404.
+- **Orden y filtros.** De la más nueva a la más vieja (por `fecha` y, si empatan, por `id`); filtros `leida` y `tipo`. No hay búsqueda ni otro orden: la app no los necesita.
+- **Contador `no_leidas` dentro del listado.** La paginación normal (`count`, `next`, `previous`, `results`) trae además el total de no leídas del usuario. Así la app pinta el contador sin pedir otra ruta. El total no depende de los filtros ni de la página (si se filtra `tipo=sancion`, el contador sigue siendo el total del usuario).
+- **Leer una ya leída no falla:** responde 200 y no cambia nada.
+- **`leer-todas/` devuelve cuántas cambió** (`marcadas`; las que ya estaban leídas no cuentan) y el nuevo `no_leidas` (0). Es un solo `UPDATE`, sin traer las filas.
+- **Sirve para los tres roles.** El administrador también recibe notificaciones (`nueva_donacion`, `nueva_solicitud`, `novedad_creada`), así que la ruta solo exige un usuario `Activo`.
+- **Revisión de RN-40: se usan los 14 tipos.** `nueva_donacion` (crear donación), `donacion_validada` y `donacion_rechazada` (revisión de la donación), `nueva_solicitud` (enviar carrito), `solicitud_aprobada` (aprobar y nueva fecha límite tras una novedad rechazada), `solicitud_rechazada`, `solicitud_cancelada` (RN-28, novedad aceptada, RN-71 y RN-73), `alimento_cancelado` (novedad aceptada con cancelación parcial), `solicitud_entregada`, `solicitud_no_recogida` (RN-27), `novedad_creada`, `novedad_aceptada`, `novedad_rechazada` y `sancion`. Algunos casos no tienen aviso porque ninguna regla lo pide: cancelar una solicitud el propio beneficiario (RN-23), las `Pendiente` canceladas por RN-70 al donante, y el rechazo automático de donaciones `Pendiente` por RN-73 (el donante ya recibe la notificación `sancion`).
+
+## Paso 11 — Vencimientos (RN-50)
+
+- **El comando reutiliza las funciones que ya existían.**
+  - RN-27 y RN-28 con `aplicar_vencimientos()`, la misma que se usa antes de aprobar, rechazar o entregar.
+  - Los bloqueos con `desbloquear_si_vencido()`, la misma del login (RN-03).
+  - RN-16 con `recalcular_estado_donacion()`.
+  - Lo único nuevo es cómo encontrar los registros y cómo contarlos.
+- **Orden del comando.** Primero las solicitudes, porque devolver cantidades recalcula la donación. Después los bloqueos y al final las donaciones, para las que quedaron desactualizadas por otra causa (por ejemplo, un alimento que venció sin que nadie lo pidiera).
+- **Un registro por transacción.** Cada solicitud, usuario y donación se procesa en su propia transacción. Si uno falla, el error queda en el log, se cuenta en "Errores" y se sigue con los demás.
+- **Se puede ejecutar varias veces sin efectos dobles.** Cada función vuelve a revisar el estado con la fila bloqueada antes de cambiarla. Una solicitud que ya pasó a `No recogida` no se vuelve a tocar, así que no se devuelve la cantidad dos veces ni se repiten notificaciones. Si dos ejecuciones coinciden, la segunda espera el bloqueo y luego no encuentra nada que hacer.
+- **Bloqueos vencidos.**
+  - A quien está `Bloqueado` con `bloqueado_hasta` vencido se le pasa a `Activo` y su temporal queda `vigente = 0`.
+  - A quien está `Inactivo` solo se le cierra la sanción y el estado no cambia; RN-75 decide al reactivarlo.
+  - Los alimentos del donante vuelven a mostrarse solos (RN-77), porque RN-14 solo exige que el donante esté `Activo`.
+  - El cierre de sanciones de los inactivos excluye a los `Bloqueado`: si a uno de ellos le falló el desbloqueo, no se le cierra la sanción dejándolo bloqueado sin motivo.
+- **Consultas eficientes.**
+  - Para no revisar los registros uno por uno, una sola consulta con subconsultas `EXISTS` devuelve solo los ids que de verdad cambiarían:
+    - `Pendiente` con algún detalle no cancelado cuyo vencimiento sea menor que hoy + margen. Es lo mismo que "vencimiento − margen ya pasó" de RN-28.
+    - `Aprobada` con `fecha_limite_recogida` vencida y sin novedad `Pendiente` (RN-31).
+  - En las donaciones, la consulta busca las `Validada` sin disponibilidad y las `Agotada` con disponibilidad o sin solicitudes en curso. Son justo los casos en que RN-16 daría otro estado.
+  - Si no hay nada vencido, el costo es de **2 consultas** (la configuración y la búsqueda). Las pruebas lo verifican con `assertNumQueries`.
+- **Antes de listar.**
+  - Rutas: `mis-solicitudes/`, `admin/solicitudes/`, `donaciones/` del donante, `admin/donaciones/` y `donaciones/{id}/solicitudes-recibidas/`.
+  - Se aplican los vencimientos solo a los registros que ese listado puede mostrar y que de verdad estén vencidos: las solicitudes del beneficiario, las de las donaciones del donante, las de esa donación, o todas para el administrador.
+  - Se usa el conjunto **antes de los filtros y de la paginación**. Si se procesara solo la página o lo ya filtrado, `?estado=Aprobada` mostraría una solicitud que en realidad acaba de pasar a `No recogida`, y `?estado=No recogida` no la mostraría.
+  - En los listados del administrador la búsqueda recorre todo, pero es una sola consulta. Además, como el comando corre cada hora, casi nunca hay algo vencido que procesar.
+- **También antes de enviar el carrito** (RN-50). Se aplican los vencimientos a las solicitudes en curso del beneficiario: una `Aprobada` vencida pasa a `No recogida` y deja de ocupar un cupo de `max_solicitudes_activas`.
+- **`aplicar_vencimientos()` ahora devuelve el nuevo estado** (`No recogida`, `Cancelada` o nada) en lugar de verdadero/falso, para que el comando pueda contar cada caso.
+- **Dónde vive el comando:** `apps/solicitudes/management/commands/procesar_vencimientos.py`. Solo coordina: la lógica está en los `services.py` de solicitudes, sanciones y donaciones.
+
+### Cómo programar el comando en producción
+
+Se recomienda **cada hora**. El plazo de recogida se mide en días, así que una hora de retraso no afecta. Además, los listados y las acciones aplican los vencimientos de lo que tocan aunque el comando no haya corrido.
+
+**Windows (Programador de tareas)**, desde una consola como administrador:
+
+```
+schtasks /Create /SC HOURLY /TN "Kumora - procesar vencimientos" ^
+  /TR "cmd /c cd /d C:\ruta\kuska-backend && venv\Scripts\python.exe manage.py procesar_vencimientos >> logs\vencimientos.log 2>&1"
+```
+
+- Se cambia `C:\ruta\kuska-backend` por la carpeta real y se crea antes la carpeta `logs`.
+- El `cd` hace falta para que Django encuentre el `.env`.
+- Para revisar la tarea: `schtasks /Query /TN "Kumora - procesar vencimientos"`. Para correrla a mano: `schtasks /Run /TN "Kumora - procesar vencimientos"`.
+- También se puede crear desde la interfaz gráfica: Programador de tareas → Crear tarea básica → Diariamente, repetir cada 1 hora → Iniciar un programa (`cmd`), con los mismos argumentos.
+
+**Linux (cron)**, con `crontab -e`:
+
+```
+0 * * * * cd /ruta/kuska-backend && venv/bin/python manage.py procesar_vencimientos >> logs/vencimientos.log 2>&1
+```
+
+En los dos casos el resumen y los errores quedan en `logs/vencimientos.log`. Si aparece "Errores: N", se revisa el detalle en ese archivo y se vuelve a ejecutar: lo que ya se procesó no se repite.
