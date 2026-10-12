@@ -707,7 +707,13 @@ def aceptar_novedad(admin, novedad_id, respuesta=None):
 
 
 def rechazar_novedad(admin, novedad_id, respuesta):
-    """RN-33 (y RN-31 para la fecha límite): lo afectado vuelve a mostrarse."""
+    """
+    RN-33 (y RN-31 para la fecha límite): lo afectado vuelve a mostrarse. Si a
+    una solicitud Aprobada se le recalcula la fecha límite, se avisa al
+    beneficiario con la nueva fecha.
+    """
+    from apps.solicitudes.services import texto_fecha  # import local: evita importación circular
+
     with transaction.atomic():
         novedad = _bloquear_novedad_pendiente(novedad_id)
         ahora = timezone.now()
@@ -720,6 +726,16 @@ def rechazar_novedad(admin, novedad_id, respuesta):
             if solicitud.fecha_limite_recogida and solicitud.fecha_limite_recogida <= ahora:
                 solicitud.fecha_limite_recogida = _fecha_limite_tras_novedad(solicitud, config, ahora)
                 solicitud.save(update_fields=["fecha_limite_recogida", "fecha_actualizacion"])
+                crear_notificacion(
+                    solicitud.beneficiario,
+                    Notificacion.Tipo.SOLICITUD_APROBADA,
+                    "Nueva fecha límite para tu solicitud",
+                    f"Tu solicitud {solicitud.codigo_pedido} de «{novedad.donacion.titulo}» sigue "
+                    "aprobada. Mientras se revisaba una novedad del donante venció la fecha "
+                    "para recogerla, así que se te dio un nuevo plazo. Nueva fecha límite: "
+                    f"{texto_fecha(solicitud.fecha_limite_recogida)}.",
+                    solicitud=solicitud,
+                )
 
         novedad.estado = Novedad.Estado.RECHAZADA
         novedad.respuesta_admin = respuesta

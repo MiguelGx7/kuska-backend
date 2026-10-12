@@ -6,6 +6,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenRefreshView
 
+from apps.sanciones import services as servicios_sanciones
+from apps.sanciones.serializers import ImpactoConsultaSerializer, ImpactoSerializer
+
 from . import services
 from .filters import UsuarioFilter
 from .models import Usuario
@@ -202,7 +205,8 @@ class AdminUsuarioViewSet(
     @extend_schema(
         summary="Cambiar estado entre Activo e Inactivo (RN-04, RN-75)",
         description=(
-            "No aplica a administradores ni a uno mismo. Inactivar cierra todas sus sesiones. "
+            "No aplica a administradores ni a uno mismo. Inactivar cierra todas sus sesiones y "
+            "todo lo que tiene en curso (RN-71/RN-73); consulta antes impacto/?accion=inactivar. "
             "Reactivar devuelve a Activo, o a Bloqueado si aún tiene un bloqueo vigente."
         ),
         request=CambiarEstadoSerializer,
@@ -215,3 +219,21 @@ class AdminUsuarioViewSet(
         serializer.is_valid(raise_exception=True)
         usuario = services.cambiar_estado(request.user, usuario.pk, serializer.validated_data["estado"])
         return Response(AdminUsuarioSerializer(usuario).data)
+
+    @extend_schema(
+        summary="Impacto de una sanción o inactivación (RN-74, RN-05)",
+        description=(
+            "Muestra, SIN aplicar nada, lo que pasaría con la acción indicada: conteos y un resumen "
+            "en texto (ej. \"3 solicitud(es) se cancelarán\"). Usa la misma lógica que la cascada "
+            "real. Incluye la sanción sugerida según todo el historial del usuario."
+        ),
+        parameters=[ImpactoConsultaSerializer],
+        responses={200: ImpactoSerializer},
+    )
+    @action(detail=True, methods=["get"])
+    def impacto(self, request, pk=None):
+        usuario = self.get_object()
+        consulta = ImpactoConsultaSerializer(data=request.query_params)
+        consulta.is_valid(raise_exception=True)
+        resultado = servicios_sanciones.calcular_impacto(usuario.pk, consulta.validated_data["accion"])
+        return Response(ImpactoSerializer(resultado).data)

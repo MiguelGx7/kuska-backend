@@ -415,12 +415,15 @@ def cambiar_estado(admin, usuario_id, nuevo_estado):
         if nuevo_estado == Usuario.Estado.INACTIVO:
             if usuario.estado == Usuario.Estado.INACTIVO:
                 raise ValidationError({"estado": ["El usuario ya está inactivo."]})
+            # Import local: sanciones/services.py importa este módulo.
+            from apps.sanciones.services import DEFINITIVO, aplicar_cascada
+
             # Se conserva bloqueado_hasta; al reactivar se recalcula con RN-75.
             usuario.estado = Usuario.Estado.INACTIVO
             usuario.save(update_fields=["estado", "fecha_actualizacion"])
             invalidar_refresh_tokens(usuario)
-            # TODO Paso 9: RN-71/RN-73 (cancelar solicitudes, rechazar o
-            # finalizar donaciones, vaciar carrito y notificar).
+            # RN-71/RN-73: la inactivación (baja) cierra todo lo que está en curso.
+            aplicar_cascada(usuario, DEFINITIVO, admin, inactivacion=True)
         else:
             if usuario.estado == Usuario.Estado.ACTIVO:
                 raise ValidationError({"estado": ["El usuario ya está activo."]})

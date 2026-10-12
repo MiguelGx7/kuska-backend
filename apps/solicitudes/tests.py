@@ -858,6 +858,10 @@ class RechazarNovedadTests(BaseNovedadTest):
         vigente.refresh_from_db()
         self.assertEqual(vencida.fecha_limite_recogida, n.fecha_revision + timedelta(days=3))
         self.assertEqual(vigente.fecha_limite_recogida, vigente_limite)
+        # Ajuste del Paso 9: solo se avisa al beneficiario cuya fecha cambió, con la nueva fecha.
+        avisos = self.notificaciones("solicitud_aprobada", self.beneficiario)
+        self.assertEqual(list(avisos.values_list("solicitud_id", flat=True)), [vencida.pk])
+        self.assertIn("Nueva fecha límite", avisos.get().mensaje)
 
     def test_no_toca_solicitudes_de_otros_alimentos(self):
         ahora = timezone.now()
