@@ -1,0 +1,11 @@
+Django==5.2.18
+djangorestframework==3.18.3
+djangorestframework-simplejwt==5.5.1
+mysqlclient==2.3.0
+python-dotenv==1.2.4
+django-cors-headers==4.9.0
+django-filter==26.2
+drf-spectacular==0.30.0
+cloudinary==1.46.3
+django-cloudinary-storage==0.3.0
+Pillow==12.3.0
