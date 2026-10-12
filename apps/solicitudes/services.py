@@ -1,29 +1,32 @@
 """
-Lógica de negocio del carrito y las solicitudes (RN-20 a RN-23).
+Lógica de negocio del carrito, las solicitudes y las entregas
+(RN-20 a RN-28, RN-15, RN-31 parcial).
 
-Orden de bloqueos (para evitar bloqueos cruzados entre peticiones):
+Orden de bloqueos (regla 6, para evitar bloqueos cruzados entre peticiones):
 usuario -> solicitud -> alimentos (por id) -> configuración -> donación.
 """
 
 from collections import OrderedDict
+from datetime import datetime, time, timedelta
 
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.db.models.functions import Length
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, ValidationError
 
 from apps.catalogo.models import Configuracion
-from apps.donaciones.models import DonacionAlimento
+from apps.donaciones.models import DonacionAlimento, Novedad
 from apps.donaciones.services import (
     formato_cantidad,
     motivos_no_visible,
     recalcular_estado_donacion,
 )
 from apps.notificaciones.models import Notificacion
-from apps.notificaciones.services import notificar_administradores
+from apps.notificaciones.services import crear_notificacion, notificar_administradores
 from apps.usuarios.models import Usuario
 
-from .models import CarritoItem, DetalleSolicitud, Solicitud
+from .models import CarritoItem, DetalleSolicitud, Entrega, Solicitud
 
 MENSAJE_SOLICITUD_EN_CURSO = (
     "Ya tienes una solicitud en curso de esta donación. Cuando termine podrás pedir de nuevo."
@@ -390,3 +393,323 @@ def cancelar_solicitud(beneficiario, solicitud_id):
         solicitud.save(update_fields=["estado", "motivo_cancelacion", "fecha_actualizacion"])
         devolver_cantidades(solicitud)
     return solicitud
+
+
+# =====================================================================
+# Paso 7: gestión de solicitudes y entregas (RN-24 a RN-28, RN-31)
+# =====================================================================
+MOTIVO_PENDIENTE_VENCIDA = "Los alimentos vencieron antes de ser aprobada"
+
+
+def _texto_fecha(valor):
+    return f"{timezone.localtime(valor):%d/%m/%Y a las %H:%M}"
+
+
+def fin_del_dia(fecha):
+    """Último instante de esa fecha en la hora de Bogotá."""
+    return timezone.make_aware(datetime.combine(fecha, time.max))
+
+
+def limite_por_vencimiento(solicitud, config):
+    """
+    Final del día (vencimiento más cercano de los alimentos no cancelados
+    − margen). Después de ese momento la comida ya no se debe entregar.
+    None si la solicitud no tiene detalles vigentes.
+    """
+    fechas = solicitud.detalles.filter(cancelado=False).values_list(
+        "donacion_alimento__fecha_vencimiento", flat=True
+    )
+    if not fechas:
+        return None
+    return fin_del_dia(min(fechas) - timedelta(days=config.margen_vencimiento_dias))
+
+
+def calcular_fecha_limite(solicitud, config, fecha_gestion):
+    """RN-24: la menor entre fecha_gestion + plazo y el límite por vencimiento."""
+    por_plazo = fecha_gestion + timedelta(days=config.plazo_recogida_dias)
+    por_vencimiento = limite_por_vencimiento(solicitud, config)
+    return min(por_plazo, por_vencimiento) if por_vencimiento else por_plazo
+
+
+def novedades_pendientes(solicitud):
+    """
+    RN-31: novedades Pendiente sobre algún alimento no cancelado de la
+    solicitud o sobre toda su donación.
+    """
+    alimentos = list(
+        solicitud.detalles.filter(cancelado=False).values_list("donacion_alimento_id", flat=True)
+    )
+    return Novedad.objects.filter(estado=Novedad.Estado.PENDIENTE).filter(
+        Q(donacion_alimento_id__in=alimentos)
+        | Q(donacion_id=solicitud.donacion_id, donacion_alimento__isnull=True)
+    )
+
+
+def _mensaje_novedad(accion):
+    return (
+        f"No se puede {accion}: hay una novedad pendiente sobre alimentos de esta solicitud. "
+        "Espera a que el administrador la resuelva."
+    )
+
+
+def _bloquear_solicitud(solicitud_id, **filtros):
+    """Regla 6: solo la fila de la solicitud (no el donante ni el beneficiario que se leen con ella)."""
+    try:
+        return (
+            Solicitud.objects.select_for_update(of=("self",))
+            .select_related("donacion__donante", "beneficiario")
+            .get(pk=solicitud_id, **filtros)
+        )
+    except Solicitud.DoesNotExist:
+        raise NotFound("No encontramos esa solicitud.")
+
+
+def _notificar_ambos(solicitud, tipo, titulo, mensaje_beneficiario, mensaje_donante):
+    crear_notificacion(solicitud.beneficiario, tipo, titulo, mensaje_beneficiario, solicitud=solicitud)
+    crear_notificacion(solicitud.donacion.donante, tipo, titulo, mensaje_donante, solicitud=solicitud)
+
+
+# ---------------------------------------------------------------------
+# Vencimientos (RN-27 y RN-28)
+# ---------------------------------------------------------------------
+def marcar_no_recogida_si_vencida(solicitud, ahora=None):
+    """
+    RN-27: Aprobada con fecha_limite_recogida vencida -> No recogida.
+    Devuelve las cantidades de los detalles no cancelados, recalcula la
+    donación y notifica a ambos. Por RN-31 no aplica si hay una novedad
+    pendiente (no es culpa del beneficiario).
+    Requiere la solicitud bloqueada. Devuelve True si cambió.
+    """
+    ahora = ahora or timezone.now()
+    if (
+        solicitud.estado != Solicitud.Estado.APROBADA
+        or solicitud.fecha_limite_recogida is None
+        or solicitud.fecha_limite_recogida >= ahora
+        or novedades_pendientes(solicitud).exists()
+    ):
+        return False
+
+    solicitud.estado = Solicitud.Estado.NO_RECOGIDA
+    solicitud.save(update_fields=["estado", "fecha_actualizacion"])
+    devolver_cantidades(solicitud)
+    titulo = solicitud.donacion.titulo
+    _notificar_ambos(
+        solicitud,
+        Notificacion.Tipo.SOLICITUD_NO_RECOGIDA,
+        "Solicitud no recogida",
+        f"Tu solicitud {solicitud.codigo_pedido} de «{titulo}» venció sin ser entregada "
+        f"(fecha límite: {_texto_fecha(solicitud.fecha_limite_recogida)}).",
+        f"La solicitud {solicitud.codigo_pedido} de {solicitud.beneficiario.nombre_para_mostrar} "
+        f"sobre tu donación «{titulo}» venció sin ser entregada. "
+        "Los alimentos volvieron a estar disponibles.",
+    )
+    return True
+
+
+def cancelar_si_pendiente_vencida(solicitud, ahora=None):
+    """
+    RN-28: Pendiente cuyo vencimiento más cercano − margen ya pasó: ya no se
+    puede aprobar. Pasa a Cancelada, devuelve cantidades, recalcula la
+    donación y notifica a ambos. Sin sanción.
+    Requiere la solicitud bloqueada. Devuelve True si cambió.
+    """
+    if solicitud.estado != Solicitud.Estado.PENDIENTE:
+        return False
+    limite = limite_por_vencimiento(solicitud, Configuracion.objects.get(pk=1))
+    if limite is None or limite >= (ahora or timezone.now()):
+        return False
+
+    solicitud.estado = Solicitud.Estado.CANCELADA
+    solicitud.motivo_cancelacion = MOTIVO_PENDIENTE_VENCIDA
+    solicitud.save(update_fields=["estado", "motivo_cancelacion", "fecha_actualizacion"])
+    devolver_cantidades(solicitud)
+    titulo = solicitud.donacion.titulo
+    _notificar_ambos(
+        solicitud,
+        Notificacion.Tipo.SOLICITUD_CANCELADA,
+        "Solicitud cancelada por vencimiento",
+        f"Tu solicitud {solicitud.codigo_pedido} de «{titulo}» se canceló: "
+        "los alimentos vencieron antes de ser aprobada.",
+        f"La solicitud {solicitud.codigo_pedido} de {solicitud.beneficiario.nombre_para_mostrar} "
+        f"sobre tu donación «{titulo}» se canceló: los alimentos vencieron antes de ser aprobada.",
+    )
+    return True
+
+
+def aplicar_vencimientos(solicitud_id):
+    """
+    Aplica RN-27 y RN-28 a una solicitud en su PROPIA transacción, para que
+    el cambio quede guardado aunque la acción que sigue (aprobar, rechazar
+    o entregar) termine en error.
+    """
+    with transaction.atomic():
+        solicitud = _bloquear_solicitud(solicitud_id)
+        return marcar_no_recogida_si_vencida(solicitud) or cancelar_si_pendiente_vencida(solicitud)
+
+
+def _exigir_estado(solicitud, estado, accion):
+    if solicitud.estado == estado:
+        return
+    motivo = f" Motivo: {solicitud.motivo_cancelacion}." if solicitud.motivo_cancelacion else ""
+    raise ValidationError(
+        f"No se puede {accion}: la solicitud está {solicitud.estado} y debe estar {estado}.{motivo}"
+    )
+
+
+def _texto_entrega(solicitud):
+    if solicitud.modalidad_entrega == Solicitud.ModalidadEntrega.RECOGER:
+        return f"Recoger en {solicitud.donacion.direccion_recogida}"
+    return f"Domicilio a {solicitud.direccion_entrega}"
+
+
+# ---------------------------------------------------------------------
+# Aprobar (RN-24)
+# ---------------------------------------------------------------------
+def aprobar_solicitud(admin, solicitud_id):
+    aplicar_vencimientos(solicitud_id)
+    with transaction.atomic():
+        solicitud = _bloquear_solicitud(solicitud_id)
+        _exigir_estado(solicitud, Solicitud.Estado.PENDIENTE, "aprobar")
+        if novedades_pendientes(solicitud).exists():
+            raise ValidationError(_mensaje_novedad("aprobar"))
+
+        ahora = timezone.now()
+        limite = calcular_fecha_limite(solicitud, Configuracion.objects.get(pk=1), ahora)
+        if limite <= ahora:
+            raise ValidationError(
+                "No se puede aprobar: por el vencimiento de los alimentos ya no queda tiempo para recogerlos."
+            )
+
+        solicitud.estado = Solicitud.Estado.APROBADA
+        solicitud.gestionada_por = admin
+        solicitud.fecha_gestion = ahora
+        solicitud.fecha_limite_recogida = limite
+        solicitud.save(update_fields=[
+            "estado", "gestionada_por", "fecha_gestion", "fecha_limite_recogida", "fecha_actualizacion",
+        ])
+
+        donante = solicitud.donacion.donante
+        titulo = solicitud.donacion.titulo
+        entrega = _texto_entrega(solicitud)
+        fecha = _texto_fecha(limite)
+        crear_notificacion(
+            solicitud.beneficiario,
+            Notificacion.Tipo.SOLICITUD_APROBADA,
+            "Tu solicitud fue aprobada",
+            f"Tu solicitud {solicitud.codigo_pedido} de «{titulo}» fue aprobada. {entrega}. "
+            f"Fecha límite: {fecha}. Donante: {donante.nombre_para_mostrar}, teléfono {donante.telefono}.",
+            solicitud=solicitud,
+        )
+        crear_notificacion(
+            donante,
+            Notificacion.Tipo.SOLICITUD_APROBADA,
+            "Se aprobó una solicitud de tu donación",
+            f"Se aprobó la solicitud {solicitud.codigo_pedido} de "
+            f"{solicitud.beneficiario.nombre_para_mostrar} sobre «{titulo}». {entrega}. "
+            f"Fecha límite: {fecha}.",
+            solicitud=solicitud,
+        )
+    return solicitud
+
+
+# ---------------------------------------------------------------------
+# Rechazar (RN-25)
+# ---------------------------------------------------------------------
+def rechazar_solicitud(admin, solicitud_id, motivo):
+    aplicar_vencimientos(solicitud_id)
+    with transaction.atomic():
+        solicitud = _bloquear_solicitud(solicitud_id)
+        _exigir_estado(solicitud, Solicitud.Estado.PENDIENTE, "rechazar")
+        solicitud.estado = Solicitud.Estado.RECHAZADA
+        solicitud.motivo_rechazo = motivo
+        solicitud.gestionada_por = admin
+        solicitud.fecha_gestion = timezone.now()
+        solicitud.save(update_fields=[
+            "estado", "motivo_rechazo", "gestionada_por", "fecha_gestion", "fecha_actualizacion",
+        ])
+        devolver_cantidades(solicitud)  # también recalcula la donación (RN-16)
+        crear_notificacion(
+            solicitud.beneficiario,
+            Notificacion.Tipo.SOLICITUD_RECHAZADA,
+            "Tu solicitud fue rechazada",
+            f"Tu solicitud {solicitud.codigo_pedido} de «{solicitud.donacion.titulo}» fue rechazada. "
+            f"Motivo: {motivo}",
+            solicitud=solicitud,
+        )
+    return solicitud
+
+
+# ---------------------------------------------------------------------
+# Entregar (RN-26)
+# ---------------------------------------------------------------------
+def registrar_entrega(usuario, solicitud_id, observacion=None, solo_donante=False):
+    """
+    La registra el administrador o el donante dueño de la donación
+    (solo_donante=True), sobre una solicitud Aprobada. Es total: cualquier
+    diferencia va en la observación.
+    """
+    filtros = {"donacion__donante": usuario} if solo_donante else {}
+    if not Solicitud.objects.filter(pk=solicitud_id, **filtros).exists():
+        raise NotFound("No encontramos esa solicitud.")
+
+    aplicar_vencimientos(solicitud_id)
+    with transaction.atomic():
+        solicitud = _bloquear_solicitud(solicitud_id, **filtros)
+        _exigir_estado(solicitud, Solicitud.Estado.APROBADA, "registrar la entrega")
+        if novedades_pendientes(solicitud).exists():
+            raise ValidationError(_mensaje_novedad("registrar la entrega"))
+
+        entrega = Entrega.objects.create(
+            solicitud=solicitud, registrada_por=usuario, observacion=observacion or None
+        )
+        solicitud.estado = Solicitud.Estado.ENTREGADA
+        solicitud.save(update_fields=["estado", "fecha_actualizacion"])
+        recalcular_estado_donacion(solicitud.donacion)
+        crear_notificacion(
+            solicitud.beneficiario,
+            Notificacion.Tipo.SOLICITUD_ENTREGADA,
+            "Tu solicitud fue entregada",
+            f"Se registró la entrega de tu solicitud {solicitud.codigo_pedido} de "
+            f"«{solicitud.donacion.titulo}».",
+            solicitud=solicitud,
+        )
+    return entrega
+
+
+# ---------------------------------------------------------------------
+# Donante: solicitudes recibidas (RN-15)
+# ---------------------------------------------------------------------
+def solicitudes_recibidas(donacion):
+    """
+    Por cada alimento de la donación: quién pidió, cuánto y en qué estado.
+    Teléfono y dirección del beneficiario solo si la solicitud está
+    Aprobada, Entregada o No recogida. La dirección es la de entrega si es
+    Domicilio; si es Recoger, la del perfil del beneficiario.
+    """
+    detalles = (
+        DetalleSolicitud.objects.filter(solicitud__donacion=donacion)
+        .select_related("solicitud__beneficiario")
+        .order_by("solicitud__fecha_solicitud", "id")
+    )
+    por_alimento = OrderedDict(
+        (a.pk, {"alimento": a, "solicitudes": []}) for a in donacion.alimentos.order_by("id")
+    )
+    for detalle in detalles:
+        solicitud = detalle.solicitud
+        beneficiario = solicitud.beneficiario
+        con_contacto = solicitud.estado in Solicitud.ESTADOS_CON_CONTACTO
+        direccion = (
+            solicitud.direccion_entrega
+            if solicitud.modalidad_entrega == Solicitud.ModalidadEntrega.DOMICILIO
+            else beneficiario.direccion
+        )
+        por_alimento[detalle.donacion_alimento_id]["solicitudes"].append({
+            "solicitud": solicitud,
+            "detalle": detalle,
+            "beneficiario": {
+                "nombre": beneficiario.nombre_para_mostrar,
+                "telefono": beneficiario.telefono if con_contacto else None,
+                "direccion": direccion if con_contacto else None,
+            },
+        })
+    return list(por_alimento.values())

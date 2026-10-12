@@ -5,7 +5,7 @@ from rest_framework import serializers
 
 from apps.donaciones.serializers import AlimentoDisponibleSerializer, FotoUrlMixin
 
-from .models import CarritoItem, DetalleSolicitud, Solicitud
+from .models import CarritoItem, DetalleSolicitud, Entrega, Solicitud
 
 
 # ---------------------------------------------------------------------
@@ -130,3 +130,99 @@ class MiSolicitudSerializer(serializers.ModelSerializer):
 class PedidoEnviadoSerializer(serializers.Serializer):
     codigo_pedido = serializers.CharField()
     solicitudes = MiSolicitudSerializer(many=True)
+
+
+# ---------------------------------------------------------------------
+# Gestión (Paso 7)
+# ---------------------------------------------------------------------
+class EntregaSerializer(serializers.ModelSerializer):
+    registrada_por = serializers.EmailField(source="registrada_por.correo", read_only=True)
+
+    class Meta:
+        model = Entrega
+        fields = ("id", "fecha_entrega", "registrada_por", "observacion")
+        read_only_fields = fields
+
+
+class PersonaContactoSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    nombre = serializers.CharField(source="nombre_para_mostrar")
+    correo = serializers.EmailField()
+    telefono = serializers.CharField()
+    direccion = serializers.CharField(allow_null=True)
+
+
+class AdminSolicitudSerializer(serializers.ModelSerializer):
+    """El administrador ve todo: datos de ambas partes y la entrega si existe."""
+
+    donacion_titulo = serializers.CharField(source="donacion.titulo", read_only=True)
+    direccion_recogida = serializers.CharField(source="donacion.direccion_recogida", read_only=True, allow_null=True)
+    beneficiario = PersonaContactoSerializer(read_only=True)
+    donante = PersonaContactoSerializer(source="donacion.donante", read_only=True)
+    gestionada_por = serializers.EmailField(source="gestionada_por.correo", read_only=True, allow_null=True)
+    detalles = DetalleSolicitudSerializer(many=True, read_only=True)
+    entrega = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Solicitud
+        fields = (
+            "id", "codigo_pedido", "estado", "modalidad_entrega", "direccion_entrega",
+            "direccion_recogida", "motivo_rechazo", "motivo_cancelacion", "fecha_solicitud",
+            "fecha_gestion", "fecha_limite_recogida", "gestionada_por", "donacion",
+            "donacion_titulo", "beneficiario", "donante", "detalles", "entrega",
+        )
+        read_only_fields = fields
+
+    @extend_schema_field(EntregaSerializer(allow_null=True))
+    def get_entrega(self, obj):
+        entrega = getattr(obj, "entrega", None)
+        return EntregaSerializer(entrega).data if entrega else None
+
+
+class RechazarSolicitudSerializer(serializers.Serializer):
+    motivo_rechazo = serializers.CharField(
+        max_length=255,
+        error_messages={
+            "required": "Debes indicar el motivo del rechazo.",
+            "blank": "Debes indicar el motivo del rechazo.",
+        },
+    )
+
+
+class EntregarSerializer(serializers.Serializer):
+    observacion = serializers.CharField(
+        max_length=255, required=False, allow_blank=True,
+        help_text="Opcional. La entrega es total; aquí se anota cualquier diferencia.",
+    )
+
+
+# ---------------------------------------------------------------------
+# Donante: solicitudes recibidas (RN-15)
+# ---------------------------------------------------------------------
+class BeneficiarioContactoSerializer(serializers.Serializer):
+    nombre = serializers.CharField()
+    telefono = serializers.CharField(allow_null=True)
+    direccion = serializers.CharField(allow_null=True)
+
+
+class SolicitudRecibidaSerializer(serializers.Serializer):
+    solicitud = serializers.IntegerField(source="solicitud.pk")
+    codigo_pedido = serializers.CharField(source="solicitud.codigo_pedido")
+    estado = serializers.CharField(source="solicitud.estado")
+    modalidad_entrega = serializers.CharField(source="solicitud.modalidad_entrega")
+    fecha_solicitud = serializers.DateTimeField(source="solicitud.fecha_solicitud")
+    fecha_limite_recogida = serializers.DateTimeField(source="solicitud.fecha_limite_recogida", allow_null=True)
+    cantidad = serializers.DecimalField(source="detalle.cantidad", max_digits=10, decimal_places=2)
+    cancelado = serializers.BooleanField(source="detalle.cancelado")
+    beneficiario = BeneficiarioContactoSerializer()
+
+
+class AlimentoConSolicitudesSerializer(serializers.Serializer):
+    alimento = serializers.IntegerField(source="alimento.pk")
+    nombre = serializers.CharField(source="alimento.nombre")
+    unidad_medida = serializers.CharField(source="alimento.unidad_medida")
+    cantidad_total = serializers.DecimalField(source="alimento.cantidad_total", max_digits=10, decimal_places=2)
+    cantidad_disponible = serializers.DecimalField(
+        source="alimento.cantidad_disponible", max_digits=10, decimal_places=2
+    )
+    solicitudes = SolicitudRecibidaSerializer(many=True)

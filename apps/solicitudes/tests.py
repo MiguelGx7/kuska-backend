@@ -1,7 +1,9 @@
 """Pruebas del Paso 6: carrito y envío de solicitudes (RN-20 a RN-23, RN-29)."""
 
+from datetime import timedelta
 from decimal import Decimal
 
+from django.db.models import F
 from django.utils import timezone
 
 from apps.catalogo.models import Configuracion
@@ -11,7 +13,13 @@ from apps.notificaciones.models import Notificacion
 from apps.usuarios.models import Rol, Usuario
 from apps.usuarios.tests import cliente_de, crear_admin, crear_usuario
 
-from .models import CarritoItem, DetalleSolicitud, Solicitud
+from .models import CarritoItem, DetalleSolicitud, Entrega, Solicitud
+from .services import (
+    MOTIVO_PENDIENTE_VENCIDA,
+    cancelar_si_pendiente_vencida,
+    fin_del_dia,
+    marcar_no_recogida_si_vencida,
+)
 
 
 class BaseCarritoTest(BaseDonacionTest):
@@ -410,3 +418,300 @@ class MisSolicitudesTests(BaseCarritoTest):
     def test_puede_volver_a_pedir_despues_de_cancelar(self):
         self.cb.post(f"/api/mis-solicitudes/{self.solicitud.pk}/cancelar/")
         self.assertEqual(self.agregar(self.panela, 1).status_code, 201)
+
+
+# =====================================================================
+# Paso 7: gestión de solicitudes y entregas (RN-24 a RN-28, RN-31, RN-15)
+# =====================================================================
+class BaseGestionTest(BaseCarritoTest):
+    def crear_solicitud(self, donacion, items, estado="Pendiente", modalidad="Recoger",
+                        direccion=None, limite=None, codigo="KUM-20261012-0001"):
+        """Crea la solicitud con sus detalles y descuenta las cantidades (como al enviar)."""
+        solicitud = Solicitud.objects.create(
+            codigo_pedido=codigo, beneficiario=self.beneficiario, donacion=donacion,
+            modalidad_entrega=modalidad, direccion_entrega=direccion, estado=estado,
+            fecha_limite_recogida=limite,
+        )
+        for alimento, cantidad in items:
+            DetalleSolicitud.objects.create(
+                solicitud=solicitud, donacion_alimento=alimento, cantidad=Decimal(cantidad)
+            )
+            DonacionAlimento.objects.filter(pk=alimento.pk).update(
+                cantidad_disponible=F("cantidad_disponible") - Decimal(cantidad)
+            )
+        return solicitud
+
+    def accion(self, solicitud, accion, datos=None, cliente=None):
+        return (cliente or self.cliente_admin).post(
+            f"/api/admin/solicitudes/{solicitud.pk}/{accion}/", datos or {}, format="json"
+        )
+
+    def vencer(self, alimento, dias=0):
+        DonacionAlimento.objects.filter(pk=alimento.pk).update(
+            fecha_vencimiento=timezone.localdate() + timedelta(days=dias)
+        )
+
+    def notificaciones(self, tipo, usuario):
+        return Notificacion.objects.filter(tipo=tipo, usuario=usuario)
+
+
+class AdminSolicitudListadoTests(BaseGestionTest):
+    def test_solo_administradores(self):
+        self.assertEqual(self.cb.get("/api/admin/solicitudes/").status_code, 403)
+        self.assertEqual(self.cliente.get("/api/admin/solicitudes/").status_code, 403)
+
+    def test_filtros_y_detalle(self):
+        s1 = self.crear_solicitud(self.d1, [(self.arroz, "1")], codigo="KUM-20261012-0001")
+        self.crear_solicitud(self.d2, [(self.panela, "1")], estado="Aprobada", codigo="KUM-20261012-0002")
+        url = "/api/admin/solicitudes/"
+        self.assertEqual(self.cliente_admin.get(url).data["count"], 2)
+        self.assertEqual(self.cliente_admin.get(url, {"estado": "Aprobada"}).data["count"], 1)
+        self.assertEqual(self.cliente_admin.get(url, {"codigo_pedido": "kum-20261012-0001"}).data["count"], 1)
+        self.assertEqual(self.cliente_admin.get(url, {"beneficiario": self.beneficiario.pk}).data["count"], 2)
+        self.assertEqual(self.cliente_admin.get(url, {"donacion": self.d2.pk}).data["count"], 1)
+        r = self.cliente_admin.get(f"{url}{s1.pk}/")
+        self.assertEqual(r.data["beneficiario"]["correo"], "bene@k.com")
+        self.assertEqual(r.data["donante"]["correo"], "dona@k.com")
+        self.assertIsNone(r.data["entrega"])
+        self.assertEqual(len(r.data["detalles"]), 1)
+
+
+class AprobarSolicitudTests(BaseGestionTest):
+    def test_aprueba_con_fecha_limite_por_plazo_y_notifica(self):
+        s = self.crear_solicitud(self.d2, [(self.panela, "2")])
+        r = self.accion(s, "aprobar")
+        s.refresh_from_db()
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(s.estado, "Aprobada")
+        self.assertEqual(s.gestionada_por, self.admin)
+        # Vence en 30 días: manda el plazo de 3 días.
+        self.assertEqual(s.fecha_limite_recogida, s.fecha_gestion + timedelta(days=3))
+        mensaje = self.notificaciones("solicitud_aprobada", self.beneficiario).get().mensaje
+        self.assertIn("Recoger en Calle 1", mensaje)
+        self.assertIn("Fecha límite", mensaje)
+        self.assertTrue(self.notificaciones("solicitud_aprobada", self.donante).exists())
+
+    def test_fecha_limite_por_vencimiento_al_final_del_dia(self):
+        self.vencer(self.panela, 3)  # 3 - margen 1 = pasado mañana, antes que hoy + 3 días
+        s = self.crear_solicitud(self.d2, [(self.panela, "1")])
+        self.accion(s, "aprobar")
+        s.refresh_from_db()
+        esperado = fin_del_dia(timezone.localdate() + timedelta(days=2))
+        self.assertEqual(s.fecha_limite_recogida, esperado)
+        self.assertEqual(timezone.localtime(s.fecha_limite_recogida).strftime("%H:%M"), "23:59")
+
+    def test_notificacion_de_domicilio(self):
+        s = self.crear_solicitud(self.d3, [(self.frijol, "1")], modalidad="Domicilio", direccion="Carrera 9")
+        self.accion(s, "aprobar")
+        self.assertIn("Domicilio a Carrera 9", self.notificaciones("solicitud_aprobada", self.beneficiario).get().mensaje)
+
+    def test_solo_pendientes(self):
+        s = self.crear_solicitud(self.d2, [(self.panela, "1")], estado="Aprobada",
+                                 limite=timezone.now() + timedelta(days=1))
+        r = self.accion(s, "aprobar")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("debe estar Pendiente", str(r.data))
+
+    def test_rn28_pendiente_vencida_se_cancela_antes_de_aprobar(self):
+        s = self.crear_solicitud(self.d2, [(self.panela, "2")])
+        self.vencer(self.panela, 0)  # vence hoy: hoy − 1 ya pasó
+        r = self.accion(s, "aprobar")
+        s.refresh_from_db()
+        self.assertEqual(r.status_code, 400)
+        self.assertIn(MOTIVO_PENDIENTE_VENCIDA, str(r.data))
+        self.assertEqual((s.estado, s.motivo_cancelacion), ("Cancelada", MOTIVO_PENDIENTE_VENCIDA))
+        self.assertEqual(self.disponible(self.panela), Decimal("10"))
+        self.assertTrue(self.notificaciones("solicitud_cancelada", self.beneficiario).exists())
+        self.assertTrue(self.notificaciones("solicitud_cancelada", self.donante).exists())
+        self.d2.refresh_from_db()
+        self.assertEqual(self.d2.estado, "Finalizada")  # sin disponibilidad ni solicitudes en curso
+
+    def test_rn31_no_aprueba_con_novedad_pendiente(self):
+        s = self.crear_solicitud(self.d1, [(self.arroz, "1")])
+        novedad = Novedad.objects.create(donante=self.donante, donacion=self.d1, donacion_alimento=self.arroz, descripcion="x")
+        r = self.accion(s, "aprobar")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("novedad pendiente", str(r.data))
+        # Una novedad sobre toda la donación también lo impide.
+        novedad.donacion_alimento = None
+        novedad.save()
+        self.assertEqual(self.accion(s, "aprobar").status_code, 400)
+
+    def test_rn31_ignora_novedades_de_alimentos_cancelados_o_de_otros(self):
+        s = self.crear_solicitud(self.d1, [(self.arroz, "1"), (self.leche, "1")])
+        DetalleSolicitud.objects.filter(solicitud=s, donacion_alimento=self.leche).update(cancelado=True)
+        Novedad.objects.create(donante=self.donante, donacion=self.d1, donacion_alimento=self.leche, descripcion="x")
+        self.assertEqual(self.accion(s, "aprobar").status_code, 200)
+
+
+class RechazarSolicitudTests(BaseGestionTest):
+    def test_exige_motivo(self):
+        s = self.crear_solicitud(self.d2, [(self.panela, "1")])
+        for datos in ({}, {"motivo_rechazo": " "}):
+            r = self.accion(s, "rechazar", datos)
+            self.assertEqual(r.status_code, 400)
+            self.assertEqual(r.data["motivo_rechazo"], ["Debes indicar el motivo del rechazo."])
+
+    def test_rechaza_devuelve_cantidades_recalcula_y_notifica(self):
+        DonacionAlimento.objects.filter(pk=self.panela.pk).update(cantidad_disponible=Decimal("2"))
+        s = self.crear_solicitud(self.d2, [(self.panela, "2")])
+        Donacion.objects.filter(pk=self.d2.pk).update(estado="Agotada")
+        r = self.accion(s, "rechazar", {"motivo_rechazo": "Ya tienes muchas solicitudes"})
+        s.refresh_from_db()
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual((s.estado, s.motivo_rechazo, s.gestionada_por), ("Rechazada", "Ya tienes muchas solicitudes", self.admin))
+        self.assertEqual(self.disponible(self.panela), Decimal("2"))
+        self.d2.refresh_from_db()
+        self.assertEqual(self.d2.estado, "Validada")
+        self.assertIn("Ya tienes muchas", self.notificaciones("solicitud_rechazada", self.beneficiario).get().mensaje)
+
+    def test_solo_pendientes(self):
+        s = self.crear_solicitud(self.d2, [(self.panela, "1")], estado="Entregada")
+        self.assertEqual(self.accion(s, "rechazar", {"motivo_rechazo": "x"}).status_code, 400)
+
+
+class EntregarSolicitudTests(BaseGestionTest):
+    def aprobada(self, donacion=None, items=None, limite=None):
+        return self.crear_solicitud(
+            donacion or self.d2, items or [(self.panela, "1")], estado="Aprobada",
+            limite=limite or timezone.now() + timedelta(days=2),
+        )
+
+    def test_admin_registra_la_entrega(self):
+        DonacionAlimento.objects.filter(pk=self.panela.pk).update(cantidad_disponible=Decimal("1"))
+        s = self.aprobada()
+        r = self.accion(s, "entregar", {"observacion": "Faltó una panela"})
+        s.refresh_from_db()
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(s.estado, "Entregada")
+        self.assertEqual(r.data["entrega"]["observacion"], "Faltó una panela")
+        self.assertEqual(s.entrega.registrada_por, self.admin)
+        self.assertTrue(self.notificaciones("solicitud_entregada", self.beneficiario).exists())
+        # Sin disponibilidad ni solicitudes en curso: la donación queda Finalizada (RN-16).
+        self.d2.refresh_from_db()
+        self.assertEqual(self.d2.estado, "Finalizada")
+
+    def test_observacion_opcional(self):
+        s = self.aprobada()
+        self.assertEqual(self.accion(s, "entregar").status_code, 200)
+        self.assertIsNone(Entrega.objects.get(solicitud=s).observacion)
+
+    def test_solo_aprobadas_y_una_vez(self):
+        s = self.crear_solicitud(self.d2, [(self.panela, "1")])
+        self.assertEqual(self.accion(s, "entregar").status_code, 400)
+        s2 = self.aprobada(self.d1, [(self.arroz, "1")])
+        self.assertEqual(self.accion(s2, "entregar").status_code, 200)
+        r = self.accion(s2, "entregar")
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(Entrega.objects.filter(solicitud=s2).count(), 1)
+
+    def test_donante_dueno_registra_la_entrega(self):
+        s = self.aprobada()
+        r = self.cliente.post(f"/api/solicitudes/{s.pk}/entregar/", {"observacion": "ok"}, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data["registrada_por"], "dona@k.com")
+        s.refresh_from_db()
+        self.assertEqual(s.estado, "Entregada")
+
+    def test_otro_donante_o_beneficiario_no_pueden(self):
+        s = self.aprobada()
+        r = cliente_de(self.otro_donante).post(f"/api/solicitudes/{s.pk}/entregar/", {}, format="json")
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(self.cb.post(f"/api/solicitudes/{s.pk}/entregar/", {}, format="json").status_code, 403)
+
+    def test_rn31_no_entrega_con_novedad_pendiente(self):
+        s = self.aprobada()
+        Novedad.objects.create(donante=self.donante, donacion=self.d2, descripcion="toda")
+        r = self.accion(s, "entregar")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("novedad pendiente", str(r.data))
+
+    def test_rn27_vencida_pasa_a_no_recogida_antes_de_entregar(self):
+        s = self.aprobada(limite=timezone.now() - timedelta(minutes=1))
+        r = self.accion(s, "entregar")
+        s.refresh_from_db()
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(s.estado, "No recogida")
+        self.assertEqual(self.disponible(self.panela), Decimal("10"))
+        self.assertTrue(self.notificaciones("solicitud_no_recogida", self.beneficiario).exists())
+        self.assertTrue(self.notificaciones("solicitud_no_recogida", self.donante).exists())
+
+    def test_rn31_con_novedad_pendiente_no_se_marca_no_recogida(self):
+        s = self.aprobada(limite=timezone.now() - timedelta(minutes=1))
+        Novedad.objects.create(donante=self.donante, donacion=self.d2, donacion_alimento=self.panela, descripcion="x")
+        self.accion(s, "entregar")
+        s.refresh_from_db()
+        self.assertEqual(s.estado, "Aprobada")
+        self.assertEqual(self.disponible(self.panela), Decimal("9"))
+
+
+class VencimientosTests(BaseGestionTest):
+    """Las funciones de RN-27 y RN-28 directamente (el comando llega en el Paso 11)."""
+
+    def test_rn27_no_cambia_si_la_fecha_limite_no_ha_pasado(self):
+        s = self.crear_solicitud(self.d2, [(self.panela, "1")], estado="Aprobada",
+                                 limite=timezone.now() + timedelta(hours=1))
+        self.assertFalse(marcar_no_recogida_si_vencida(s))
+        self.assertEqual(Solicitud.objects.get(pk=s.pk).estado, "Aprobada")
+
+    def test_rn27_solo_aprobadas(self):
+        s = self.crear_solicitud(self.d2, [(self.panela, "1")], limite=timezone.now() - timedelta(days=1))
+        self.assertFalse(marcar_no_recogida_si_vencida(s))
+
+    def test_rn27_no_devuelve_detalles_cancelados(self):
+        s = self.crear_solicitud(self.d1, [(self.arroz, "1"), (self.leche, "2")], estado="Aprobada",
+                                 limite=timezone.now() - timedelta(minutes=1))
+        DetalleSolicitud.objects.filter(solicitud=s, donacion_alimento=self.leche).update(cancelado=True)
+        self.assertTrue(marcar_no_recogida_si_vencida(s))
+        self.assertEqual(self.disponible(self.arroz), Decimal("10"))
+        self.assertEqual(self.disponible(self.leche), Decimal("8"))
+
+    def test_rn28_solo_si_el_vencimiento_menos_margen_ya_paso(self):
+        s = self.crear_solicitud(self.d2, [(self.panela, "1")])
+        self.vencer(self.panela, 1)  # hoy + 1 − margen 1 = hoy: vence al final de hoy, aún no
+        self.assertFalse(cancelar_si_pendiente_vencida(s))
+        self.vencer(self.panela, 0)
+        self.assertTrue(cancelar_si_pendiente_vencida(s))
+
+    def test_rn28_ignora_alimentos_cancelados(self):
+        s = self.crear_solicitud(self.d1, [(self.arroz, "1"), (self.leche, "1")])
+        DetalleSolicitud.objects.filter(solicitud=s, donacion_alimento=self.leche).update(cancelado=True)
+        self.vencer(self.leche, 0)
+        self.assertFalse(cancelar_si_pendiente_vencida(s))
+
+
+class SolicitudesRecibidasTests(BaseGestionTest):
+    def url(self, donacion):
+        return f"/api/donaciones/{donacion.pk}/solicitudes-recibidas/"
+
+    def test_por_alimento_con_contacto_solo_desde_aprobada(self):
+        Usuario.objects.filter(pk=self.beneficiario.pk).update(telefono="3201112233")
+        otro = crear_usuario("otro_b@k.com", Rol.BENEFICIARIO, "30")
+        pendiente = self.crear_solicitud(self.d1, [(self.arroz, "1")], codigo="KUM-20261012-0001")
+        aprobada = Solicitud.objects.create(
+            codigo_pedido="KUM-20261012-0002", beneficiario=otro, donacion=self.d1,
+            modalidad_entrega="Domicilio", direccion_entrega="Calle 99", estado="Aprobada",
+        )
+        DetalleSolicitud.objects.create(solicitud=aprobada, donacion_alimento=self.arroz, cantidad=2)
+
+        r = self.cliente.get(self.url(self.d1))
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual([a["alimento"] for a in r.data], [self.arroz.pk, self.leche.pk])
+        arroz, leche = r.data
+        self.assertEqual(leche["solicitudes"], [])
+        por_solicitud = {x["solicitud"]: x for x in arroz["solicitudes"]}
+        self.assertEqual(por_solicitud[pendiente.pk]["cantidad"], "1.00")
+        self.assertEqual(por_solicitud[pendiente.pk]["beneficiario"],
+                         {"nombre": self.beneficiario.nombre_para_mostrar, "telefono": None, "direccion": None})
+        self.assertEqual(por_solicitud[aprobada.pk]["estado"], "Aprobada")
+        self.assertEqual(por_solicitud[aprobada.pk]["beneficiario"]["telefono"], "3000000000")
+        self.assertEqual(por_solicitud[aprobada.pk]["beneficiario"]["direccion"], "Calle 99")
+
+    def test_recoger_muestra_la_direccion_del_perfil(self):
+        self.crear_solicitud(self.d2, [(self.panela, "1")], estado="Entregada")
+        beneficiario = self.cliente.get(self.url(self.d2)).data[0]["solicitudes"][0]["beneficiario"]
+        self.assertEqual(beneficiario["direccion"], "Carrera 7 # 1-1")
+
+    def test_solo_el_donante_dueno(self):
+        self.assertEqual(cliente_de(self.otro_donante).get(self.url(self.d1)).status_code, 404)
+        self.assertEqual(self.cb.get(self.url(self.d1)).status_code, 403)

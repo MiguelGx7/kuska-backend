@@ -5,12 +5,17 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.usuarios.permissions import PERMISOS_BENEFICIARIO
+from apps.usuarios.permissions import PERMISOS_ADMIN, PERMISOS_BENEFICIARIO, PERMISOS_DONANTE
 
 from . import services
+from .filters import AdminSolicitudFilter
 from .models import DetalleSolicitud, Solicitud
 from .serializers import (
+    AdminSolicitudSerializer,
     CarritoAgregarSerializer,
+    EntregarSerializer,
+    EntregaSerializer,
+    RechazarSolicitudSerializer,
     CarritoCantidadSerializer,
     CarritoItemSerializer,
     CarritoSerializer,
@@ -140,3 +145,100 @@ class MisSolicitudesViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vi
         solicitud = self.get_object()
         services.cancelar_solicitud(request.user, solicitud.pk)
         return Response(MiSolicitudSerializer(self.get_queryset().get(pk=solicitud.pk)).data)
+
+
+# ---------------------------------------------------------------------
+# Administrador (Paso 7)
+# ---------------------------------------------------------------------
+@extend_schema_view(
+    list=extend_schema(
+        summary="Listar solicitudes",
+        description=(
+            "Filtros: estado, codigo_pedido, beneficiario (id) y donacion (id). "
+            "Búsqueda por código, correo o documento del beneficiario."
+        ),
+    ),
+    retrieve=extend_schema(summary="Ver una solicitud"),
+)
+@extend_schema(tags=["Admin - Solicitudes"])
+class AdminSolicitudViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = PERMISOS_ADMIN
+    serializer_class = AdminSolicitudSerializer
+    filterset_class = AdminSolicitudFilter
+    search_fields = ["codigo_pedido", "beneficiario__correo", "beneficiario__numero_documento"]
+    ordering_fields = ["fecha_solicitud", "estado", "fecha_limite_recogida"]
+
+    def get_queryset(self):
+        return _solicitudes_con_detalle(
+            Solicitud.objects.select_related(
+                "beneficiario", "gestionada_por", "entrega__registrada_por"
+            ).order_by("-fecha_solicitud", "-id")
+        )
+
+    def _respuesta(self, solicitud_id):
+        return Response(AdminSolicitudSerializer(self.get_queryset().get(pk=solicitud_id)).data)
+
+    @extend_schema(
+        summary="Aprobar solicitud (RN-24)",
+        description=(
+            "Antes aplica RN-27/RN-28 a esta solicitud. No aprueba si hay una novedad pendiente "
+            "(RN-31). Calcula fecha_limite_recogida y notifica al beneficiario y al donante."
+        ),
+        request=None,
+        responses={200: AdminSolicitudSerializer},
+    )
+    @action(detail=True, methods=["post"])
+    def aprobar(self, request, pk=None):
+        solicitud = self.get_object()
+        services.aprobar_solicitud(request.user, solicitud.pk)
+        return self._respuesta(solicitud.pk)
+
+    @extend_schema(
+        summary="Rechazar solicitud (RN-25)",
+        description="Motivo obligatorio. Devuelve las cantidades y notifica al beneficiario.",
+        request=RechazarSolicitudSerializer,
+        responses={200: AdminSolicitudSerializer},
+    )
+    @action(detail=True, methods=["post"])
+    def rechazar(self, request, pk=None):
+        solicitud = self.get_object()
+        serializer = RechazarSolicitudSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        services.rechazar_solicitud(request.user, solicitud.pk, serializer.validated_data["motivo_rechazo"])
+        return self._respuesta(solicitud.pk)
+
+    @extend_schema(
+        summary="Registrar entrega (RN-26)",
+        description="Solo solicitudes Aprobada y sin novedad pendiente. La entrega es total.",
+        request=EntregarSerializer,
+        responses={200: AdminSolicitudSerializer},
+    )
+    @action(detail=True, methods=["post"])
+    def entregar(self, request, pk=None):
+        solicitud = self.get_object()
+        serializer = EntregarSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        services.registrar_entrega(request.user, solicitud.pk, serializer.validated_data.get("observacion"))
+        return self._respuesta(solicitud.pk)
+
+
+# ---------------------------------------------------------------------
+# Donante: registrar entrega (RN-26)
+# ---------------------------------------------------------------------
+class EntregaDonanteView(APIView):
+    permission_classes = PERMISOS_DONANTE
+
+    @extend_schema(
+        tags=["Donante - Donaciones"],
+        summary="Registrar entrega de una solicitud de mi donación (RN-26)",
+        description="Solo el donante dueño, solo solicitudes Aprobada. La entrega es total.",
+        request=EntregarSerializer,
+        responses={201: EntregaSerializer},
+    )
+    def post(self, request, pk):
+        serializer = EntregarSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        entrega = services.registrar_entrega(
+            request.user, pk, serializer.validated_data.get("observacion"), solo_donante=True
+        )
+        return Response(EntregaSerializer(entrega).data, status=status.HTTP_201_CREATED)

@@ -7,6 +7,8 @@ from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
+from apps.solicitudes import services as servicios_solicitudes
+from apps.solicitudes.serializers import AlimentoConSolicitudesSerializer
 from apps.usuarios.permissions import PERMISOS_ADMIN, PERMISOS_BENEFICIARIO, PERMISOS_DONANTE
 
 from . import services
@@ -139,6 +141,21 @@ class DonacionDonanteViewSet(
         donacion = self.get_object()
         services.quitar_alimento(request.user, donacion.pk, int(alimento_id))
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @extend_schema(
+        summary="Solicitudes recibidas por alimento (RN-15)",
+        description=(
+            "Quién pidió, cuánto y en qué estado, por cada alimento. Teléfono y dirección del "
+            "beneficiario solo si la solicitud está Aprobada, Entregada o No recogida. "
+            "Con el id de la solicitud se registra la entrega en solicitudes/{id}/entregar/."
+        ),
+        responses={200: AlimentoConSolicitudesSerializer(many=True)},
+    )
+    @action(detail=True, methods=["get"], url_path="solicitudes-recibidas", pagination_class=None)
+    def solicitudes_recibidas(self, request, pk=None):
+        donacion = self.get_object()
+        datos = servicios_solicitudes.solicitudes_recibidas(donacion)
+        return Response(AlimentoConSolicitudesSerializer(datos, many=True).data)
 
 
 # ---------------------------------------------------------------------
