@@ -11,6 +11,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from config.certificado import ruta_certificado
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Carga las variables del .env en os.environ (también CLOUDINARY_URL,
@@ -23,12 +25,21 @@ def env_list(nombre, por_defecto=""):
     return [v.strip() for v in os.getenv(nombre, por_defecto).split(",") if v.strip()]
 
 
+def env_bool(nombre, por_defecto="False"):
+    return os.getenv(nombre, por_defecto).strip().lower() in ("true", "1", "yes")
+
+
 # ---------------------------------------------------------------------
 # Básico
 # ---------------------------------------------------------------------
 SECRET_KEY = os.environ["SECRET_KEY"]
-DEBUG = os.getenv("DEBUG", "False").strip().lower() in ("true", "1", "yes")
+DEBUG = env_bool("DEBUG")
 ALLOWED_HOSTS = env_list("ALLOWED_HOSTS")
+# Orígenes con HTTPS desde donde se envían formularios con cookie CSRF
+# (el admin de Django en el dominio de Railway). Ej.: https://kumora.up.railway.app
+CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS")
+# Swagger (api/docs/) siempre con DEBUG; en producción solo si SWAGGER_PUBLICO=True.
+SWAGGER_PUBLICO = DEBUG or env_bool("SWAGGER_PUBLICO")
 
 
 # ---------------------------------------------------------------------
@@ -65,6 +76,8 @@ AUTH_USER_MODEL = "usuarios.Usuario"
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # Sirve los estáticos (admin y Swagger) sin un servidor aparte.
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -97,8 +110,9 @@ WSGI_APPLICATION = "config.wsgi.application"
 # ---------------------------------------------------------------------
 # Base de datos: MySQL en Aiven (con SSL)
 # ---------------------------------------------------------------------
-# DB_SSL_CA puede ser relativa (ej. "ca.pem"): se resuelve desde BASE_DIR.
-DB_SSL_CA = str(BASE_DIR / os.environ["DB_SSL_CA"])
+# Local: DB_SSL_CA es la ruta al ca.pem (relativa a BASE_DIR o absoluta).
+# Railway: DB_SSL_CA_CONTENIDO trae el texto del certificado (ver config/certificado.py).
+DB_SSL_CA = ruta_certificado(BASE_DIR, os.getenv("DB_SSL_CA"), os.getenv("DB_SSL_CA_CONTENIDO"))
 
 DATABASES = {
     "default": {
@@ -146,7 +160,13 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 
 STORAGES = {
     "default": {"BACKEND": "cloudinary_storage.storage.MediaCloudinaryStorage"},
-    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+    # En producción, WhiteNoise sirve versiones comprimidas y con nombre único
+    # (caché larga). Requiere collectstatic, que corre al arrancar en Railway.
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"
+        if DEBUG
+        else "whitenoise.storage.CompressedManifestStaticFilesStorage"
+    },
 }
 
 # django-cloudinary-storage toma las credenciales de CLOUDINARY_URL.
@@ -167,6 +187,9 @@ EMAIL_BACKEND = (
 )
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
 EMAIL_USE_TLS = True
+# Si el servidor de correo no responde (ej. SMTP bloqueado por el hosting), se
+# corta a los 10 s en lugar de dejar la petición colgada; el error queda en el log.
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER)
 
 
@@ -239,3 +262,31 @@ SPECTACULAR_SETTINGS = {
         "TipoNotificacionEnum": "apps.notificaciones.models.Notificacion.Tipo",
     },
 }
+
+
+# ---------------------------------------------------------------------
+# Producción (DEBUG=False): HTTPS y cookies seguras (check --deploy)
+# ---------------------------------------------------------------------
+# Nada de este bloque aplica en desarrollo local (DEBUG=True).
+if not DEBUG:
+    # Railway termina el HTTPS en su proxy y le pasa la petición a gunicorn por
+    # HTTP con X-Forwarded-Proto: https. Con esto Django sabe que fue segura.
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    # HSTS: el navegador recordará usar solo HTTPS. Empieza bajo (1 hora) y se
+    # sube (ej. 31536000 = 1 año) cuando el dominio esté estable; es difícil de revertir.
+    SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "3600"))
+    # Sin incluir subdominios ni pedir "preload": en un dominio *.up.railway.app
+    # no controlamos los subdominios, y la lista de preload de los navegadores es
+    # casi irreversible. Por eso se silencian esas dos advertencias a propósito.
+    SILENCED_SYSTEM_CHECKS = ["security.W005", "security.W021"]
+
+    # Errores a la consola (stdout), que es lo que muestran los logs de Railway.
+    LOGGING = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "handlers": {"consola": {"class": "logging.StreamHandler"}},
+        "root": {"handlers": ["consola"], "level": "WARNING"},
+    }

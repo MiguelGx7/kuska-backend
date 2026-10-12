@@ -5,16 +5,20 @@ Corren sobre una base temporal (test_<DB_NAME>) que Django crea y borra.
 """
 
 import re
+import tempfile
 from datetime import timedelta
+from pathlib import Path
+from unittest import mock
 
 from django.core import mail
 from django.core.cache import cache
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.sanciones.models import Sancion
+from config.certificado import ruta_certificado
 
 from .models import RecuperacionContrasena, Rol, Usuario
 from .permissions import EsAdministrador, EsBeneficiario, EsDonante
@@ -603,3 +607,35 @@ class ContratoApiTests(TestCase):
         login = esquema["paths"]["/api/auth/login/"]["post"]
         self.assertEqual(set(login["responses"]), {"200", "400", "401", "403", "429"})
         self.assertIn("examples", login["requestBody"]["content"]["application/json"])
+
+
+# =====================================================================
+# Paso 14: certificado de Aiven por variable (despliegue en Railway)
+# =====================================================================
+class CertificadoAivenTests(SimpleTestCase):
+    PEM = "-----BEGIN CERTIFICATE-----\nMIIabc\n-----END CERTIFICATE-----"
+
+    def setUp(self):
+        self.carpeta = tempfile.TemporaryDirectory()
+        self.addCleanup(self.carpeta.cleanup)
+        parche = mock.patch("config.certificado.tempfile.gettempdir", return_value=self.carpeta.name)
+        parche.start()
+        self.addCleanup(parche.stop)
+
+    def test_en_local_usa_la_ruta_relativa_al_proyecto(self):
+        self.assertEqual(ruta_certificado("/proyecto", "ca.pem"), str(Path("/proyecto") / "ca.pem"))
+
+    def test_en_railway_escribe_el_contenido_en_un_temporal(self):
+        ruta = ruta_certificado("/proyecto", "ca.pem", self.PEM)  # el contenido manda
+        self.assertTrue(ruta.startswith(self.carpeta.name))
+        self.assertEqual(Path(ruta).read_text(encoding="utf-8"), self.PEM + "\n")
+
+    def test_acepta_saltos_de_linea_escritos_como_barra_n(self):
+        ruta = ruta_certificado("/proyecto", None, self.PEM.replace("\n", "\n"))
+        self.assertEqual(Path(ruta).read_text(encoding="utf-8"), self.PEM + "\n")
+
+    def test_errores_claros(self):
+        with self.assertRaisesMessage(ValueError, "no parece un certificado PEM"):
+            ruta_certificado("/proyecto", None, "texto cualquiera")
+        with self.assertRaisesMessage(ValueError, "define DB_SSL_CA"):
+            ruta_certificado("/proyecto", None, "  ")

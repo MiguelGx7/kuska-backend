@@ -1,0 +1,7 @@
+{
+  "buildAptPackages": ["pkg-config", "build-essential", "default-libmysqlclient-dev"],
+  "deploy": {
+    "aptPackages": ["libmariadb3"],
+    "startCommand": "python manage.py migrate --noinput && python manage.py collectstatic --noinput && gunicorn config.wsgi --bind 0.0.0.0:$PORT --workers 2 --timeout 60 --access-logfile -"
+  }
+}

@@ -256,3 +256,61 @@ La forma recomendada sería leer esas opciones del `.env` dentro de un bloque `i
 - **Comprobación:** esas 3 pruebas se volvieron a correr solas, también sin `--keepdb`, y pasaron.
 - **Corridas anteriores:** en las dos corridas completas previas del mismo día hubo cortes iguales, siempre en pruebas distintas. Todas las demás pasaron.
 - **Para una evidencia sin cortes:** correr la suite desde una red estable o contra un MySQL local.
+
+## Paso 14 — Preparar el despliegue en Railway
+
+La guía de clics está en [docs/despliegue_railway.md](despliegue_railway.md). Aquí se explica por qué se hizo así.
+
+- **Servidor y estáticos.**
+  - `gunicorn` 26.2.0 reemplaza a `runserver`, que no sirve para producción.
+  - `whitenoise` 6.12.0 sirve los estáticos del admin y de Swagger desde el mismo proceso, sin Nginx ni un bucket aparte.
+  - En producción se usa `CompressedManifestStaticFilesStorage`: archivos comprimidos y con nombre único, que el navegador puede guardar en caché por mucho tiempo.
+  - En local se mantiene el almacenamiento normal, así `runserver` y las pruebas no necesitan `collectstatic`.
+- **Comando de inicio en `railpack.json`.**
+  - `python manage.py migrate --noinput && python manage.py collectstatic --noinput && gunicorn config.wsgi --bind 0.0.0.0:$PORT --workers 2 --timeout 60`.
+  - Se eligió `railpack.json` y no `Procfile` ni `railway.json` por tres razones:
+    - Railpack, el constructor actual de Railway, marca el `Procfile` como obsoleto.
+    - En `railway.json` el comando **se impondría también al servicio cron**, porque la configuración en código reemplaza la del panel.
+    - Con `railpack.json` el comando es el predeterminado de la imagen, y el servicio cron lo reemplaza con su propio "Custom Start Command".
+  - Con 2 workers alcanzan los recursos básicos de Railway, y un *timeout* de 60 s da margen a la subida de fotos a Cloudinary.
+  - `collectstatic` corre al arrancar y no en el build, para no depender de que las variables estén disponibles durante la construcción. Tarda pocos segundos.
+- **Python 3.14 (`.python-version`).**
+  - Railpack acepta cualquier versión de Python ≥ 3.10 que siga con soporte, y la toma de `.python-version` (si no hay, usa 3.13).
+  - Todas las dependencias funcionan en 3.14: Django 5.2 la soporta, y Pillow y las demás tienen ruedas para 3.14 o son Python puro. `mysqlclient` se compila en el build.
+  - Se fija **la misma versión del desarrollo** para que producción corra lo mismo que se probó.
+- **`mysqlclient` en Linux: se queda, con sus paquetes de compilación.**
+  - En Linux no tiene ruedas precompiladas: se compila y necesita `pkg-config`, un compilador y los encabezados de MySQL/MariaDB.
+  - Railpack detecta MySQL e instala `default-libmysqlclient-dev`, pero no `pkg-config`. Por eso `railpack.json` agrega `pkg-config` y `build-essential` al build, y `libmariadb3` (la librería que usa al correr) a la imagen final.
+  - Se prefirió esto a cambiar a PyMySQL por tres razones:
+    - Es el **mismo driver** con el que pasaron las 301 pruebas.
+    - Es más rápido (está escrito en C).
+    - Es el que indica CLAUDE.md.
+  - **Plan B**, si el build fallara igual: instalar `PyMySQL` y, al inicio de `config/__init__.py`, llamar a `pymysql.install_as_MySQLdb()`. Django 5.2 pide `mysqlclient` ≥ 1.4.3, y PyMySQL se presenta como 1.4.6, así que pasa la verificación. Habría que volver a correr la suite con ese driver.
+- **Certificado de Aiven por variable.** El `ca.pem` no está en git, y debe seguir así.
+  - En Railway, `DB_SSL_CA_CONTENIDO` trae el texto del certificado. Al arrancar se escribe en la carpeta temporal del sistema (`kumora_aiven_ca.pem`), porque el driver necesita una ruta.
+  - Cada worker de gunicorn carga los settings, así que solo se escribe si el contenido cambió.
+  - Acepta saltos de línea reales o escritos como `\n`, y falla con un mensaje claro si el texto no es un PEM.
+  - En local nada cambia: sin esa variable se usa `DB_SSL_CA` como antes.
+  - La lógica está en `config/certificado.py` para poder probarla sola, con 4 pruebas.
+  - Se comprobó una conexión real a Aiven usando solo el contenido.
+- **Producción solo con `DEBUG=False`.** Un bloque `if not DEBUG:` al final de `settings.py` activa:
+  - `SECURE_PROXY_SSL_HEADER`: Railway termina el HTTPS en su proxy y le pasa la petición a gunicorn por HTTP con `X-Forwarded-Proto: https`; sin esto, Django creería que la petición no es segura y redirigiría sin fin.
+  - `SECURE_SSL_REDIRECT`, `SESSION_COOKIE_SECURE` y `CSRF_COOKIE_SECURE`.
+  - `SECURE_HSTS_SECONDS`, que sale del `.env` y vale **3600 por defecto** (bajo al empezar, porque es difícil de revertir).
+  - Los logs de error a la consola, que es lo que muestra Railway.
+
+  Las pruebas y el desarrollo local no ven nada de esto, porque el `.env` local tiene `DEBUG=True`.
+- **`check --deploy` sin advertencias.** Con las variables de producción simuladas, las 5 advertencias del Paso 13 desaparecieron. Al activar HSTS aparecen dos más, que se **silencian a propósito** en producción:
+  - `W005`, incluir subdominios: en `*.up.railway.app` no controlamos los subdominios.
+  - `W021`, *preload*: entrar a la lista de preload de los navegadores es casi irreversible y no tiene sentido en un dominio de pruebas.
+
+  Si más adelante hay un dominio propio y estable, se pueden activar.
+- **`CSRF_TRUSTED_ORIGINS` desde el `.env`.** Solo lo necesita el admin de Django, que usa sesión y cookie CSRF. La API usa JWT y no le afecta.
+- **`SWAGGER_PUBLICO`.** Swagger se muestra siempre con `DEBUG=True` y, en producción, solo si `SWAGGER_PUBLICO=True`, mientras se desarrollan los frontends. Después se apaga y `/api/docs/` responde 404. Se comprobó con las dos opciones.
+- **Correo con tiempo límite.** Railway bloquea el SMTP saliente en los planes Trial y Hobby. Sin límite, el envío del código de recuperación dejaría un worker esperando. `EMAIL_TIMEOUT` (10 s por defecto) corta la espera; el servicio ya capturaba el error, así que la respuesta sigue siendo la misma y el fallo queda en el log. Si se deja `EMAIL_HOST_USER` vacío, el código sale en los logs. Un correo real necesita el plan Pro o un servicio de correo por HTTPS; eso no está hecho.
+- **Vencimientos en Railway.** Se hace con un segundo servicio del mismo repositorio:
+  - con **Cron Schedule** `0 * * * *` y como comando `python manage.py procesar_vencimientos`;
+  - el comando termina solo, que es lo que exige Railway, y Railway no lanza una ejecución si la anterior sigue activa;
+  - repetirlo no tiene efectos dobles (Paso 11).
+- **Base de producción aparte (recomendado).** Se sugiere una base `kumora_prod` en el mismo servicio de Aiven, para no mezclar datos de desarrollo y de demostración. El primer Administrador se crea con `createsuperuser` desde el PC, apuntando a esa base: RN-01 dice que el panel no crea administradores.
+- **Pruebas de este paso.** Se corrieron las de `usuarios` (las 4 del certificado, más el contrato de la API) con `--keepdb`, y `check` y `check --deploy` con variables simuladas. En otra corrida, en la misma app, hubo otro corte de la conexión con Aiven y se repitió.

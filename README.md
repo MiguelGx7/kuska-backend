@@ -24,6 +24,7 @@ Las reglas de negocio (RN-01 a RN-77) están en [CLAUDE.md](CLAUDE.md), y las de
 - Fotos en **Cloudinary** (`django-cloudinary-storage`), validadas con Pillow.
 - `django-filter`, `django-cors-headers`, `python-dotenv`.
 - `drf-spectacular` para la documentación Swagger / OpenAPI.
+- Producción: `gunicorn` (servidor) y `whitenoise` (estáticos), desplegado en **Railway**.
 
 ## Requisitos
 
@@ -60,9 +61,11 @@ El archivo `.env` está en `.gitignore`: **nunca se sube** al repositorio. La pl
 | `ALLOWED_HOSTS` | Hosts permitidos, separados por coma (`10.0.2.2` es el emulador de Android). |
 | `CORS_ALLOWED_ORIGINS` | Orígenes del panel web, separados por coma. |
 | `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT` | Conexión a MySQL en Aiven. |
-| `DB_SSL_CA` | Ruta al `ca.pem` de Aiven (relativa a la raíz del proyecto o absoluta). |
+| `DB_SSL_CA` | Ruta al `ca.pem` de Aiven (relativa a la raíz del proyecto o absoluta). Es la que se usa en local. |
+| `DB_SSL_CA_CONTENIDO` | Solo en Railway: el texto completo del `ca.pem`. Si está definida, tiene prioridad sobre `DB_SSL_CA`. |
 | `CLOUDINARY_URL` | `cloudinary://<api_key>:<api_secret>@<cloud_name>` |
-| `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `DEFAULT_FROM_EMAIL` | Correo SMTP con TLS. Con Gmail se usa una contraseña de aplicación. Si `EMAIL_HOST_USER` está vacío, los correos salen por consola. |
+| `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `DEFAULT_FROM_EMAIL` | Correo SMTP con TLS. Con Gmail se usa una contraseña de aplicación. Si `EMAIL_HOST_USER` está vacío, los correos salen por consola. `EMAIL_TIMEOUT` (10 s) evita esperas largas. |
+| `CSRF_TRUSTED_ORIGINS`, `SWAGGER_PUBLICO`, `SECURE_HSTS_SECONDS` | Solo producción (`DEBUG=False`): el dominio HTTPS para el admin, si se muestra Swagger y la duración de HSTS. En local se dejan vacías. |
 
 ## Correr el servidor
 
@@ -175,10 +178,13 @@ Cada app separa sus capas así:
 - `views.py`: vistas delgadas que validan el formato, llaman al servicio y responden.
 - `tests.py`: las pruebas.
 
-## Antes de un despliegue real
+## Despliegue en Railway
 
-`python manage.py check --deploy` muestra advertencias que son normales en desarrollo:
-- HTTPS: `SECURE_SSL_REDIRECT`, `SECURE_HSTS_SECONDS`, `SESSION_COOKIE_SECURE` y `CSRF_COOKIE_SECURE`.
-- `DEBUG=True`.
+El proyecto está listo para Railway. La guía paso a paso, con los clics en la interfaz, la lista completa de variables, el dominio, el cron de vencimientos y cómo verificar, está en [docs/despliegue_railway.md](docs/despliegue_railway.md).
 
-Qué hay que hacer en producción está explicado en [docs/decisiones.md](docs/decisiones.md) (Paso 13).
+Lo que hay en el repositorio para eso:
+- **`.python-version`:** Python 3.14.
+- **`railpack.json`:** los paquetes del sistema para compilar `mysqlclient` y el comando de inicio (`migrate` → `collectstatic` → `gunicorn` en `$PORT`).
+- **`config/settings.py`:** con `DEBUG=False` aplica HTTPS detrás del proxy, cookies seguras, HSTS y logs a la consola. Nada de eso cambia el desarrollo local.
+
+`python manage.py check --deploy` con las variables de producción queda sin advertencias. Las dos de HSTS sobre subdominios y *preload* se silencian a propósito; la razón está en [docs/decisiones.md](docs/decisiones.md), Paso 14.

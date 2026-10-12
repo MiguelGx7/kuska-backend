@@ -13,8 +13,9 @@ urlpatterns = [
     path("api/", include("apps.dashboard.urls")),
 ]
 
-# Swagger solo en desarrollo (DEBUG = True).
-if settings.DEBUG:
+# Swagger: siempre con DEBUG; en producción solo si SWAGGER_PUBLICO=True
+# (mientras se desarrollan los frontends).
+if settings.SWAGGER_PUBLICO:
     from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
     urlpatterns += [
