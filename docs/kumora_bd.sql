@@ -317,22 +317,35 @@ CREATE TABLE configuracion (
 );
 
 -- ---------------------------------------------------------------------
--- 14. RECUPERACION_CONTRASENA (codigo de 6 digitos enviado al correo)
+-- 14. CODIGO_VERIFICACION (codigo de 6 digitos enviado al correo)
+-- Sirve para dos propositos: verificar el correo al registrarse (RN-04d)
+-- y recuperar la contrasena (RN-04b). Un codigo solo vale para su
+-- proposito y su correo.
 -- codigo_hash: el codigo se guarda con hash, nunca en texto plano.
--- Vence en 15 minutos; maximo 5 intentos; pedir uno nuevo invalida
--- los anteriores del usuario.
+-- Vence en 15 minutos; maximo 5 intentos; pedir uno nuevo invalida los
+-- anteriores del mismo proposito (del usuario o, en el registro, del correo).
+-- usuario_id es NULL en los codigos de registro: el usuario aun no existe.
+-- Antes se llamaba recuperacion_contrasena (Paso 16).
 -- ---------------------------------------------------------------------
-CREATE TABLE recuperacion_contrasena (
+CREATE TABLE codigo_verificacion (
   id                BIGINT AUTO_INCREMENT PRIMARY KEY,
-  usuario_id        BIGINT NOT NULL,
+  usuario_id        BIGINT NULL,
+  proposito         ENUM('Registro','Recuperar contraseña') NOT NULL,
+  correo            VARCHAR(120) NOT NULL,
   codigo_hash       VARCHAR(255) NOT NULL,
   fecha_creacion    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   fecha_expiracion  DATETIME NOT NULL,
   intentos          INT NOT NULL DEFAULT 0,
   usado             TINYINT(1) NOT NULL DEFAULT 0,
-  CONSTRAINT fk_recuperacion_usuario FOREIGN KEY (usuario_id) REFERENCES usuario(id) ON DELETE CASCADE,
-  CONSTRAINT chk_recuperacion_intentos CHECK (intentos >= 0 AND intentos <= 5),
-  INDEX idx_recuperacion_usuario (usuario_id, usado)
+  CONSTRAINT fk_codigo_usuario FOREIGN KEY (usuario_id) REFERENCES usuario(id) ON DELETE CASCADE,
+  CONSTRAINT chk_codigo_intentos CHECK (intentos >= 0 AND intentos <= 5),
+  -- Registro: sin usuario. Recuperar contrasena: siempre con usuario.
+  CONSTRAINT chk_codigo_usuario CHECK (
+    (proposito = 'Registro' AND usuario_id IS NULL)
+    OR (proposito = 'Recuperar contraseña' AND usuario_id IS NOT NULL)
+  ),
+  INDEX idx_codigo_usuario (usuario_id, usado),
+  INDEX idx_codigo_correo (correo, proposito, usado)
 );
 
 -- =====================================================================

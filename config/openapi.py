@@ -92,14 +92,15 @@ def _errores(path, metodo, operacion):
 
 # Ejemplos de petición (JSON) de los endpoints principales: (método, ruta) -> {nombre: (resumen, valor)}.
 EJEMPLOS = {
+    ("post", "/api/auth/registro/solicitar-codigo/"): {"pedir": ("Pedir código", {"correo": "laura@correo.com"})},
     ("post", "/api/auth/registro/"): {
         "beneficiario": ("Beneficiario", {
-            "correo": "laura@correo.com", "contrasena": "Clave.Segura2026", "rol": "Beneficiario",
+            "correo": "laura@correo.com", "codigo": "482913", "contrasena": "Clave.Segura2026", "rol": "Beneficiario",
             "nombres": "Laura", "apellidos": "Gómez", "tipo_documento": "CC", "numero_documento": "1012345678",
             "telefono": "3001234567", "direccion": "Calle 1 Sur # 5-20",
         }),
         "negocio": ("Donante tipo Negocio", {
-            "correo": "tienda@correo.com", "contrasena": "Clave.Segura2026", "rol": "Donante",
+            "correo": "tienda@correo.com", "codigo": "105377", "contrasena": "Clave.Segura2026", "rol": "Donante",
             "nombres": "Carlos", "apellidos": "Pérez", "tipo_documento": "CC", "numero_documento": "79123456",
             "telefono": "3007654321", "tipo_donante": "Negocio", "nombre_negocio": "Tienda La Esquina",
             "nit": "900123456-7",

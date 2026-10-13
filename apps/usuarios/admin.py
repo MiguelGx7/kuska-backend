@@ -3,7 +3,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from django.contrib.auth.forms import BaseUserCreationForm, UserChangeForm
 
-from .models import RecuperacionContrasena, Rol, Usuario
+from .models import CodigoVerificacion, Rol, Usuario
 
 CAMPOS_DATOS = (
     "rol",
@@ -69,11 +69,11 @@ class RolAdmin(admin.ModelAdmin):
     list_display = ("id", "nombre")
 
 
-@admin.register(RecuperacionContrasena)
-class RecuperacionContrasenaAdmin(admin.ModelAdmin):
-    list_display = ("usuario", "fecha_creacion", "fecha_expiracion", "intentos", "usado")
-    list_filter = ("usado",)
-    search_fields = ("usuario__correo",)
+@admin.register(CodigoVerificacion)
+class CodigoVerificacionAdmin(admin.ModelAdmin):
+    list_display = ("correo", "proposito", "usuario", "fecha_creacion", "fecha_expiracion", "intentos", "usado")
+    list_filter = ("proposito", "usado")
+    search_fields = ("correo", "usuario__correo")
     # El código nunca se muestra: solo existe su hash.
     exclude = ("codigo_hash",)
     readonly_fields = ("fecha_creacion",)

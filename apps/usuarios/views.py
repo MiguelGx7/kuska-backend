@@ -27,6 +27,7 @@ from .serializers import (
     RefreshRespuestaSerializer,
     RefreshSerializer,
     RegistroSerializer,
+    SolicitarCodigoRegistroSerializer,
     UsuarioBasicoSerializer,
     UsuarioSerializer,
 )
@@ -46,19 +47,54 @@ class VistaPublicaMixin(LimiteAuthMixin):
         return 'Bearer realm="api"'
 
 
+def _respuesta_sesion(usuario, refresh, codigo=status.HTTP_200_OK):
+    """Lo que devuelven el login y el registro: tokens y datos básicos (con el rol)."""
+    return Response(
+        {
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+            "usuario": UsuarioBasicoSerializer(usuario).data,
+        },
+        status=codigo,
+    )
+
+
+class SolicitarCodigoRegistroView(VistaPublicaMixin, APIView):
+    @extend_schema(
+        tags=TAG,
+        summary="Registro, paso 1: pedir código al correo (RN-04d)",
+        description=(
+            "Envía un código de 6 dígitos (vence en 15 minutos, 5 intentos) al correo con el que se "
+            "creará la cuenta. Si el correo ya está registrado responde 400. Pedir otro invalida el "
+            "anterior. No crea ningún usuario. Si el correo no se puede enviar responde 503."
+        ),
+        request=SolicitarCodigoRegistroSerializer,
+        responses={200: MensajeSerializer},
+    )
+    def post(self, request):
+        serializer = SolicitarCodigoRegistroSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        services.solicitar_codigo_registro(serializer.validated_data["correo"])
+        return Response({"mensaje": services.MENSAJE_CODIGO_REGISTRO})
+
+
 class RegistroView(VistaPublicaMixin, APIView):
     @extend_schema(
         tags=TAG,
-        summary="Registrar Donante o Beneficiario",
-        description="No inicia sesión: después del registro el usuario hace login.",
+        summary="Registro, paso 2: crear Donante o Beneficiario con el código (RN-04d)",
+        description=(
+            "Valida todos los datos (RN-01, RN-02, contraseña) y después el código enviado al correo. "
+            "Si el código no es válido, venció, ya se usó o se acabaron los intentos, responde un único "
+            "mensaje y no crea nada. Si todo está bien crea la cuenta y devuelve lo mismo que el login."
+        ),
         request=RegistroSerializer,
-        responses={201: UsuarioSerializer},
+        responses={201: LoginRespuestaSerializer},
     )
     def post(self, request):
         serializer = RegistroSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         usuario = services.registrar_usuario(serializer.validated_data)
-        return Response(UsuarioSerializer(usuario).data, status=status.HTTP_201_CREATED)
+        return _respuesta_sesion(usuario, services.emitir_tokens(usuario), status.HTTP_201_CREATED)
 
 
 class LoginView(VistaPublicaMixin, APIView):
@@ -76,13 +112,7 @@ class LoginView(VistaPublicaMixin, APIView):
         serializer = LoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         usuario, refresh = services.iniciar_sesion(**serializer.validated_data)
-        return Response(
-            {
-                "access": str(refresh.access_token),
-                "refresh": str(refresh),
-                "usuario": UsuarioBasicoSerializer(usuario).data,
-            }
-        )
+        return _respuesta_sesion(usuario, refresh)
 
 
 @extend_schema(

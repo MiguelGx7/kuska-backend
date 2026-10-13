@@ -35,8 +35,8 @@ from apps.sanciones.models import Sancion
 from apps.solicitudes import services as solicitudes
 from apps.solicitudes.models import CarritoItem, Entrega, Solicitud
 from apps.usuarios import services as usuarios
-from apps.usuarios.models import RecuperacionContrasena, Rol, Usuario
-from apps.usuarios.serializers import RegistroSerializer
+from apps.usuarios.models import CodigoVerificacion, Rol, Usuario
+from apps.usuarios.serializers import DatosRegistroSerializer
 
 DOMINIO = "@demo.kumora"
 CONTRASENA = "Demo.Kumora2026"
@@ -130,9 +130,10 @@ class Command(BaseCommand):
     # Carga
     # -----------------------------------------------------------------
     def registrar(self, datos):
-        serializer = RegistroSerializer(data={**datos, "contrasena": CONTRASENA, "tipo_documento": "CC"})
+        # Mismas validaciones del registro, pero sin código de correo (no pasa por el registro público).
+        serializer = DatosRegistroSerializer(data={**datos, "contrasena": CONTRASENA, "tipo_documento": "CC"})
         serializer.is_valid(raise_exception=True)
-        return usuarios.registrar_usuario(serializer.validated_data)
+        return usuarios.crear_usuario(serializer.validated_data)
 
     def donar(self, donante, titulo, modalidad, alimentos, descripcion=None):
         """alimentos: (nombre, categoria, unidad, cantidad, dias para vencer)."""
@@ -326,7 +327,9 @@ class Command(BaseCommand):
             conteos["donaciones"] = Donacion.objects.filter(
                 pk__in=list(donaciones_demo.values_list("pk", flat=True))
             ).delete()[1].get("donaciones.Donacion", 0)
-            RecuperacionContrasena.objects.filter(usuario__in=demo).delete()
+            CodigoVerificacion.objects.filter(
+                Q(usuario__in=demo) | Q(correo__in=list(demo.values_list("correo", flat=True)))
+            ).delete()
             conteos["usuarios"] = Usuario.objects.filter(pk__in=list(demo.values_list("pk", flat=True))).delete()[1].get(
                 "usuarios.Usuario", 0
             )

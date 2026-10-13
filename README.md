@@ -156,8 +156,10 @@ Crea antes la carpeta `logs`. Para correr la tarea a mano: `schtasks /Run /TN "K
 ```
 config/                 Proyecto: settings (todo sale del .env), urls y openapi.py (errores y ejemplos de Swagger)
 apps/
-  usuarios/             Rol, Usuario (personalizado, login por correo), RecuperacionContrasena.
-                        Registro, login JWT, perfil, recuperar contraseña, permisos y administración de usuarios.
+  usuarios/             Rol, Usuario (personalizado, login por correo), CodigoVerificacion.
+                        Registro con verificación del correo (RN-04d), login JWT, perfil, recuperar
+                        contraseña, permisos y administración de usuarios. CodigoVerificacion guarda
+                        los códigos de registro y de recuperación.
   catalogo/             Categoria y Configuracion (fila única con plazos y límites).
   donaciones/           Donacion, DonacionAlimento (con foto) y Novedad. Donaciones, validación,
                         alimentos disponibles, estado de la donación (RN-16) y novedades.

@@ -370,3 +370,31 @@ La guía de clics está en [docs/despliegue_railway.md](despliegue_railway.md). 
 - **LOGGING de producción revisado.** Un solo handler de consola en el logger raíz, con formato `NIVEL logger: mensaje`. Las apps de Kumora (`apps.*`) se ven desde INFO; anymail y Django, desde WARNING. Al logger `django` se le quitan sus handlers propios, para que los errores no salgan dos veces ni se intente `mail_admins`. Se comprobó con producción simulada qué sale y qué no.
 - **Resultado: el correo con Brevo funciona en producción.** La causa de que no llegara no estaba en el código: Railway tenía **Auto deploy desactivado**, así que los push no se desplegaban y seguía corriendo la versión anterior, sin anymail. Por eso Brevo no registraba nada: la petición nunca salía hacia Brevo. Al activarlo y desplegar el último commit, el correo llegó. Los logs agregados para diagnosticar se mantienen; el de arranque (`Correo: se usa …`) habría delatado el problema de inmediato, porque no aparecía. En la guía de despliegue quedó el chequeo: Auto deploy activo y, en **Deployments**, el commit del despliegue activo igual al último.
 - **Pendiente para un uso real:** un dominio propio autenticado en Brevo. Con un remitente `@gmail.com` los correos pueden llegar a spam.
+
+## Paso 16 — Registro con verificación del correo (RN-04d)
+
+- **Por qué.** Sin verificar, cualquiera podía crear cuentas con correos ajenos o mal escritos, y después no podría recuperar la contraseña. Ahora la cuenta solo se crea si quien se registra demuestra que recibe correo en esa dirección.
+- **Una tabla generalizada, no una nueva.**
+  - `recuperacion_contrasena` pasó a ser `codigo_verificacion`, con `proposito` (Registro, Recuperar contraseña) y `correo`, y con `usuario` opcional. Siguen siendo 14 tablas y `usuario` no ganó campos.
+  - Los dos flujos son lo mismo: un código de 6 dígitos con hash, 15 minutos y 5 intentos. Separarlos duplicaría lógica y tablas.
+- **La migración renombra, no borra.** `0003_codigo_verificacion` se escribió a mano: con `makemigrations` sin preguntas, Django habría borrado la tabla y creado otra, perdiendo los registros. Los registros existentes quedan como "Recuperar contraseña" con el correo de su usuario; hay una prueba de esa parte.
+  - Un CHECK (`chk_codigo_usuario`) obliga a la coherencia: los de registro sin usuario, los de recuperación con usuario.
+  - El índice `(correo, proposito, usado)` sirve para buscar el código de registro de un correo.
+- **Un código solo sirve para su propósito y su correo.** El registro busca `proposito = Registro` y el correo exacto; la recuperación, `proposito = Recuperar contraseña` y su usuario. Hay pruebas en las dos direcciones.
+- **Primero los datos, después el código.** Un error de datos (rol, NIT, contraseña débil, documento repetido) no gasta un intento del código. El usuario lo corrige y reintenta con el mismo código.
+- **Un mensaje único para cualquier falla del código** (no coincide, vencido, usado o sin intentos), como en RN-04b, para no dar pistas a quien intente adivinarlo. Cada fallo suma un intento, y se guarda aunque la petición falle (el error se lanza fuera de la transacción).
+- **Correo ya registrado: 400 con el mismo mensaje de RN-02** ("Ya existe una cuenta con este correo"). A diferencia de la recuperación, aquí no hay nada que ocultar: el registro ya decía lo mismo al enviar los datos.
+- **Si el correo de registro no se puede enviar: 503**, y el código no queda guardado (la creación y el envío van en la misma transacción). Sin el correo no hay forma de terminar el registro, así que es mejor decirlo que responder "te enviamos un código". En la recuperación se mantiene la respuesta uniforme de RN-04b.
+- **El registro devuelve lo mismo que el login** (`access`, `refresh` y los datos con el rol), porque ya se verificó que el correo es suyo: la app entra directo, sin pedir login otra vez. El login y el registro comparten `emitir_tokens()`.
+- **Bloqueos (regla 6).**
+  - En el registro solo se bloquea la fila del código (`select_for_update`), porque el usuario aún no existe. Si dos peticiones registran el mismo correo a la vez, la segunda espera al código y lo encuentra usado.
+  - Si dos cuentas distintas chocaran por el correo o el documento, el índice único lo impide y responde 400.
+  - En la recuperación se mantiene: primero el usuario y después su código.
+- **Pedir otro código invalida los anteriores** del mismo correo y propósito, para que solo valga el último que llegó.
+- **`createsuperuser` y `cargar_demo` no pasan por el registro público.** `cargar_demo` usa `crear_usuario()`, con las mismas validaciones pero sin código, y su `--borrar` también limpia los códigos de los correos demo.
+- **El endpoint nuevo tiene el mismo throttling** "auth" (5 por minuto por IP y por endpoint).
+- **Pruebas.**
+  - 18 en `RegistroConCodigoTests`: pedir código con correo libre, ya registrado o con formato inválido; envío fallido (503); el nuevo invalida el anterior; límite 5/min.
+  - Registrar con código válido (entra con el `access`), incorrecto (suma intento), vencido, sin intentos, usado, de otro correo, de recuperación; el de registro no sirve para recuperar; los datos se validan antes; el código es obligatorio; `crear_usuario()` sin código; la recuperación sigue funcionando.
+  - Las de `RegistroTests` ahora piden el código primero.
+  - Corrieron con `--keepdb` las de `usuarios` (99) y las de `cargar_demo` (3). La migración se aplicó en `test_kumora` y en la base de desarrollo `kumora`. En producción se aplica sola al desplegar, porque el arranque corre `migrate`.

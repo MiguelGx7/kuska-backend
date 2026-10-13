@@ -143,10 +143,28 @@ class Usuario(AbstractBaseUser, PermissionsMixin):
         return self.nombres
 
 
-class RecuperacionContrasena(models.Model):
+class CodigoVerificacion(models.Model):
+    """
+    Código de 6 dígitos enviado al correo (RN-04b y RN-04d). Se guarda con hash,
+    vence en 15 minutos y admite 5 intentos. Un código solo sirve para su
+    propósito y su correo: uno de registro no recupera contraseñas, ni al revés.
+    """
+
+    class Proposito(models.TextChoices):
+        REGISTRO = "Registro", "Registro"
+        RECUPERAR_CONTRASENA = "Recuperar contraseña", "Recuperar contraseña"
+
+    # NULL en los códigos de registro: el usuario aún no existe.
     usuario = models.ForeignKey(
-        Usuario, on_delete=models.CASCADE, related_name="recuperaciones"
+        Usuario,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="codigos_verificacion",
     )
+    proposito = models.CharField(max_length=25, choices=Proposito.choices)
+    # Correo al que se envió el código (en registro es lo único que identifica al dueño).
+    correo = models.CharField(max_length=120)
     codigo_hash = models.CharField(max_length=255)
     fecha_creacion = models.DateTimeField(auto_now_add=True)
     fecha_expiracion = models.DateTimeField()
@@ -154,18 +172,26 @@ class RecuperacionContrasena(models.Model):
     usado = models.BooleanField(default=False)
 
     class Meta:
-        db_table = "recuperacion_contrasena"
-        verbose_name = "recuperación de contraseña"
-        verbose_name_plural = "recuperaciones de contraseña"
+        db_table = "codigo_verificacion"
+        verbose_name = "código de verificación"
+        verbose_name_plural = "códigos de verificación"
         constraints = [
             models.CheckConstraint(
-                name="chk_recuperacion_intentos",
+                name="chk_codigo_intentos",
                 condition=Q(intentos__gte=0, intentos__lte=5),
+            ),
+            # Registro: sin usuario (aún no existe). Recuperar: siempre con usuario.
+            models.CheckConstraint(
+                name="chk_codigo_usuario",
+                condition=Q(proposito="Registro", usuario__isnull=True)
+                | Q(proposito="Recuperar contraseña", usuario__isnull=False),
+                violation_error_message="El código de registro no lleva usuario; el de recuperación sí.",
             ),
         ]
         indexes = [
-            models.Index(fields=["usuario", "usado"], name="idx_recuperacion_usuario"),
+            models.Index(fields=["usuario", "usado"], name="idx_codigo_usuario"),
+            models.Index(fields=["correo", "proposito", "usado"], name="idx_codigo_correo"),
         ]
 
     def __str__(self):
-        return f"Recuperación de {self.usuario.correo} ({self.fecha_creacion:%Y-%m-%d %H:%M})"
+        return f"{self.proposito}: {self.correo} ({self.fecha_creacion:%Y-%m-%d %H:%M})"

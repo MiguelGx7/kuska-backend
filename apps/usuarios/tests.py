@@ -5,6 +5,7 @@ Corren sobre una base temporal (test_<DB_NAME>) que Django crea y borra.
 """
 
 import base64
+import importlib
 import json
 import re
 import tempfile
@@ -25,9 +26,15 @@ from config.certificado import ruta_certificado
 from config.correo import BREVO, CONSOLA, SMTP, elegir_backend, limpiar_clave, resumen_configuracion
 
 from .apps import registrar_configuracion_correo
-from .models import RecuperacionContrasena, Rol, Usuario
+from .models import CodigoVerificacion, Rol, Usuario
 from .permissions import EsAdministrador, EsBeneficiario, EsDonante
-from .services import MENSAJE_CODIGO_INVALIDO, MENSAJE_RECUPERACION, _enmascarar_correo
+from .services import (
+    MENSAJE_CODIGO_INVALIDO,
+    MENSAJE_CODIGO_REGISTRO,
+    MENSAJE_RECUPERACION,
+    _enmascarar_correo,
+    crear_usuario as crear_usuario_directo,
+)
 
 CLAVE = "Kumora.2026x"
 CLAVE_NUEVA = "Otra.Clave2026"
@@ -95,8 +102,14 @@ class RegistroTests(BaseAPITest):
         "contrasena": CLAVE,
     }
 
-    def registrar(self, **datos):
-        return self.post(self.url, {**self.base, **datos})
+    def registrar(self, codigo=None, **datos):
+        """Pide el código al correo (paso 1) y registra con él (paso 2)."""
+        datos = {**self.base, **datos}
+        if codigo is None:
+            r = self.post("/api/auth/registro/solicitar-codigo/", {"correo": datos["correo"]})
+            # Si el correo ya está registrado no hay código: se prueba la validación de datos.
+            codigo = re.search(r"\b(\d{6})\b", mail.outbox[-1].body).group(1) if r.status_code == 200 else "000000"
+        return self.post(self.url, {**datos, "codigo": codigo})
 
     def test_registra_donante_negocio_sin_devolver_contrasena(self):
         r = self.registrar(
@@ -104,17 +117,18 @@ class RegistroTests(BaseAPITest):
             tipo_donante="Negocio", nombre_negocio="Tienda", nit="900",
         )
         self.assertEqual(r.status_code, 201)
-        self.assertEqual(r.data["rol"], "Donante")
-        self.assertEqual(r.data["correo"], "dona@mail.com")
-        self.assertNotIn("contrasena", r.data)
-        self.assertNotIn("password", r.data)
-        self.assertNotIn("access", r.data)  # el registro no inicia sesión
+        self.assertEqual(r.data["usuario"]["rol"], "Donante")
+        self.assertEqual(r.data["usuario"]["correo"], "dona@mail.com")
+        self.assertNotIn("contrasena", r.data["usuario"])
+        self.assertNotIn("password", r.data["usuario"])
+        self.assertIn("access", r.data)  # RN-04d: el registro devuelve lo mismo que el login
+        self.assertIn("refresh", r.data)
 
     def test_registra_beneficiario_sin_datos_de_donante(self):
         r = self.registrar(correo="b@mail.com", rol="Beneficiario", numero_documento="2")
         self.assertEqual(r.status_code, 201)
-        self.assertIsNone(r.data["tipo_donante"])
-        self.assertIsNone(r.data["nit"])
+        self.assertIsNone(r.data["usuario"]["tipo_donante"])
+        self.assertIsNone(Usuario.objects.get(correo="b@mail.com").nit)
 
     def test_rechaza_rol_administrador(self):
         r = self.registrar(correo="x@mail.com", rol="Administrador", numero_documento="3")
@@ -357,7 +371,7 @@ class RecuperarContrasenaTests(BaseAPITest):
         )
 
     def ultima_recuperacion(self):
-        return RecuperacionContrasena.objects.filter(usuario=self.usuario).latest("id")
+        return CodigoVerificacion.objects.filter(usuario=self.usuario, proposito="Recuperar contraseña").latest("id")
 
     def assertMensajeGenerico(self, respuesta):
         self.assertEqual(respuesta.status_code, 400)
@@ -396,7 +410,7 @@ class RecuperarContrasenaTests(BaseAPITest):
 
     def test_codigo_vencido_mismo_mensaje(self):
         codigo = self.pedir_codigo()
-        RecuperacionContrasena.objects.filter(usuario=self.usuario).update(
+        CodigoVerificacion.objects.filter(usuario=self.usuario, proposito="Recuperar contraseña").update(
             fecha_expiracion=timezone.now() - timedelta(seconds=1)
         )
         self.assertMensajeGenerico(self.confirmar_con(codigo))
@@ -753,7 +767,7 @@ class CorreoRecuperacionTests(BaseAPITest):
                 self.assertEqual((r.status_code, r.data), (200, {"mensaje": MENSAJE_RECUPERACION}))
                 self.assertIn(f"No se pudo enviar el código de recuperación al usuario {self.usuario.pk}.", log.output[0])
         # El código sí se generó (el usuario puede pedir otro cuando el correo funcione).
-        self.assertEqual(RecuperacionContrasena.objects.filter(usuario=self.usuario).count(), 2)
+        self.assertEqual(CodigoVerificacion.objects.filter(usuario=self.usuario, proposito="Recuperar contraseña").count(), 2)
 
 
 class ElegirBackendCorreoTests(SimpleTestCase):
@@ -843,3 +857,187 @@ class ConfiguracionCorreoTests(SimpleTestCase):
             log.output, [f"INFO:apps.usuarios.apps:Correo: se usa Brevo (API HTTPS). Remitente: {REMITENTE}."]
         )
         self.assertNotIn(self.CLAVE, "\n".join(log.output))
+
+
+# =====================================================================
+# Paso 16: registro con código de verificación por correo (RN-04d)
+# =====================================================================
+class RegistroConCodigoTests(BaseAPITest):
+    solicitar = "/api/auth/registro/solicitar-codigo/"
+    url = "/api/auth/registro/"
+    datos = {
+        "correo": "nueva@mail.com", "rol": "Beneficiario", "nombres": "Nueva", "apellidos": "Persona",
+        "tipo_documento": "CC", "numero_documento": "555", "telefono": "3001112233", "contrasena": CLAVE,
+    }
+
+    def pedir_codigo(self, correo="nueva@mail.com"):
+        r = self.post(self.solicitar, {"correo": correo})
+        self.assertEqual(r.status_code, 200, r.data)
+        return re.search(r"\b(\d{6})\b", mail.outbox[-1].body).group(1)
+
+    def registrar(self, codigo, **cambios):
+        return self.post(self.url, {**self.datos, **cambios, "codigo": codigo})
+
+    def codigos_registro(self, correo="nueva@mail.com"):
+        return CodigoVerificacion.objects.filter(correo=correo, proposito="Registro")
+
+    def assertNoSeCreoNada(self, r, correo="nueva@mail.com"):
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data, {"codigo": [MENSAJE_CODIGO_INVALIDO]})
+        self.assertFalse(Usuario.objects.filter(correo=correo).exists())
+
+    # --- Paso 1: pedir el código ---
+    def test_solicitar_codigo_con_correo_libre(self):
+        r = self.post(self.solicitar, {"correo": "  Nueva@Mail.com "})
+        self.assertEqual((r.status_code, r.data), (200, {"mensaje": MENSAJE_CODIGO_REGISTRO}))
+        correo = mail.outbox[0]
+        self.assertEqual(correo.subject, "Kumora: tu código para crear la cuenta")
+        self.assertEqual(correo.to, ["nueva@mail.com"])
+        self.assertRegex(correo.body, r"Tu código para crear tu cuenta en Kumora es: \d{6}\n")
+        self.assertIn("Vence en 15 minutos.", correo.body)
+        codigo = re.search(r"\b(\d{6})\b", correo.body).group(1)
+        guardado = self.codigos_registro().get()
+        self.assertIsNone(guardado.usuario)  # el usuario aún no existe
+        self.assertNotEqual(guardado.codigo_hash, codigo)  # se guarda con hash
+        self.assertAlmostEqual(
+            (guardado.fecha_expiracion - timezone.now()).total_seconds(), 15 * 60, delta=60
+        )
+        self.assertFalse(Usuario.objects.filter(correo="nueva@mail.com").exists())
+
+    def test_solicitar_codigo_con_correo_registrado(self):
+        crear_usuario("ya@mail.com", Rol.BENEFICIARIO, "1")
+        r = self.post(self.solicitar, {"correo": "YA@mail.com"})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data, {"correo": ["Ya existe una cuenta con este correo."]})  # el mismo de RN-02
+        self.assertEqual(mail.outbox, [])
+        self.assertFalse(CodigoVerificacion.objects.exists())
+
+    def test_solicitar_codigo_valida_el_formato(self):
+        r = self.post(self.solicitar, {"correo": "no-es-correo"})
+        self.assertEqual(r.data, {"correo": ["Escribe un correo válido."]})
+
+    def test_si_el_correo_no_se_envia_responde_503_y_no_queda_codigo(self):
+        with mock.patch("apps.usuarios.services.send_mail", side_effect=OSError("sin red")), \
+                self.assertLogs("apps.usuarios.services", level="ERROR"):
+            r = self.post(self.solicitar, {"correo": "nueva@mail.com"})
+        self.assertEqual(r.status_code, 503)
+        self.assertIn("No pudimos enviar el correo", str(r.data["detail"]))
+        self.assertFalse(CodigoVerificacion.objects.exists())
+
+    def test_pedir_otro_codigo_invalida_el_anterior(self):
+        primero = self.pedir_codigo()
+        segundo = self.pedir_codigo()
+        if primero != segundo:
+            self.assertNoSeCreoNada(self.registrar(primero))
+        self.assertEqual(self.registrar(segundo).status_code, 201)
+
+    def test_limite_de_5_por_minuto(self):
+        codigos = [self.api.post(self.solicitar, {"correo": f"x{i}@mail.com"}, format="json").status_code
+                   for i in range(6)]
+        self.assertEqual(codigos, [200] * 5 + [429])
+
+    # --- Paso 2: registrar con el código ---
+    def test_registro_con_codigo_valido_crea_la_cuenta_y_entra(self):
+        r = self.registrar(self.pedir_codigo())
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(set(r.data), {"access", "refresh", "usuario"})
+        self.assertEqual(r.data["usuario"]["correo"], "nueva@mail.com")
+        self.assertTrue(self.codigos_registro().get().usado)
+        # El access sirve de inmediato.
+        cliente = APIClient()
+        cliente.credentials(HTTP_AUTHORIZATION=f"Bearer {r.data['access']}")
+        self.assertEqual(cliente.get("/api/auth/perfil/").status_code, 200)
+
+    def test_codigo_incorrecto_no_crea_nada_y_suma_un_intento(self):
+        codigo = self.pedir_codigo()
+        self.assertNoSeCreoNada(self.registrar("000000" if codigo != "000000" else "111111"))
+        self.assertEqual(self.codigos_registro().get().intentos, 1)
+
+    def test_codigo_vencido(self):
+        codigo = self.pedir_codigo()
+        self.codigos_registro().update(fecha_expiracion=timezone.now() - timedelta(seconds=1))
+        self.assertNoSeCreoNada(self.registrar(codigo))
+
+    def test_cinco_intentos_y_ya_no_sirve_ni_el_correcto(self):
+        codigo = self.pedir_codigo()
+        malo = "000000" if codigo != "000000" else "111111"
+        for _ in range(5):
+            self.registrar(malo)
+        self.assertNoSeCreoNada(self.registrar(codigo))
+
+    def test_codigo_ya_usado_no_sirve_otra_vez(self):
+        codigo = self.pedir_codigo()
+        self.assertEqual(self.registrar(codigo).status_code, 201)
+        Usuario.objects.filter(correo="nueva@mail.com").delete()  # aunque la cuenta ya no exista
+        self.assertNoSeCreoNada(self.registrar(codigo, numero_documento="556"))
+
+    def test_codigo_de_otro_correo_no_sirve(self):
+        codigo = self.pedir_codigo("otra@mail.com")
+        self.assertNoSeCreoNada(self.registrar(codigo))
+        self.assertFalse(Usuario.objects.filter(correo="otra@mail.com").exists())
+
+    def test_codigo_de_recuperacion_no_sirve_para_registrarse(self):
+        # Un usuario pide recuperar su contraseña y luego el admin le cambia el correo (RN-04c):
+        # el código de recuperación sigue ligado a "nueva@mail.com", pero no es de registro.
+        usuario = crear_usuario("nueva@mail.com", Rol.BENEFICIARIO, "1")
+        self.post("/api/auth/recuperar/solicitar/", {"correo": "nueva@mail.com"})
+        codigo = re.search(r"\b(\d{6})\b", mail.outbox[-1].body).group(1)
+        Usuario.objects.filter(pk=usuario.pk).update(correo="cambiado@mail.com")
+        self.assertNoSeCreoNada(self.registrar(codigo))
+
+    def test_codigo_de_registro_no_sirve_para_recuperar(self):
+        codigo = self.pedir_codigo()
+        crear_usuario("nueva@mail.com", Rol.BENEFICIARIO, "1")  # existe, pero sin código de recuperación
+        r = self.post("/api/auth/recuperar/confirmar/",
+                      {"correo": "nueva@mail.com", "codigo": codigo, "contrasena_nueva": CLAVE_NUEVA})
+        self.assertEqual(r.data, {"codigo": [MENSAJE_CODIGO_INVALIDO]})
+        self.assertTrue(Usuario.objects.get(correo="nueva@mail.com").check_password(CLAVE))
+
+    def test_los_datos_se_validan_antes_y_no_gastan_el_codigo(self):
+        codigo = self.pedir_codigo()
+        r = self.registrar(codigo, rol="Administrador")  # RN-01
+        self.assertEqual(r.data, {"rol": ["Solo puedes registrarte como Donante o Beneficiario."]})
+        r = self.registrar(codigo, contrasena="123")  # contraseña débil
+        self.assertIn("contrasena", r.data)
+        guardado = self.codigos_registro().get()
+        self.assertEqual((guardado.intentos, guardado.usado), (0, False))
+        self.assertEqual(self.registrar(codigo).status_code, 201)
+
+    def test_el_codigo_es_obligatorio(self):
+        r = self.post(self.url, self.datos)
+        self.assertEqual(r.data, {"codigo": ["Escribe el código que te enviamos al correo."]})
+
+    def test_crear_usuario_directo_no_pide_codigo(self):
+        # cargar_demo (y createsuperuser) crean usuarios sin pasar por el registro público.
+        datos = {k: v for k, v in self.datos.items()}
+        usuario = crear_usuario_directo(datos)
+        self.assertEqual(usuario.correo, "nueva@mail.com")
+        self.assertFalse(CodigoVerificacion.objects.exists())
+
+    def test_la_recuperacion_sigue_funcionando(self):
+        usuario = crear_usuario("dona@mail.com", Rol.DONANTE, "10", tipo_donante="Persona")
+        self.post("/api/auth/recuperar/solicitar/", {"correo": "dona@mail.com"})
+        self.assertEqual(mail.outbox[-1].subject, "Kumora: código para recuperar tu contraseña")
+        codigo = re.search(r"\b(\d{6})\b", mail.outbox[-1].body).group(1)
+        guardado = CodigoVerificacion.objects.get(usuario=usuario)
+        self.assertEqual((guardado.proposito, guardado.correo), ("Recuperar contraseña", "dona@mail.com"))
+        r = self.post("/api/auth/recuperar/confirmar/",
+                      {"correo": "dona@mail.com", "codigo": codigo, "contrasena_nueva": CLAVE_NUEVA})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(self.login("dona@mail.com", CLAVE_NUEVA).status_code, 200)
+
+
+class MigracionCodigoVerificacionTests(TestCase):
+    def test_los_codigos_existentes_reciben_el_correo_de_su_usuario(self):
+        # Simula un registro de la antigua recuperacion_contrasena: con usuario y sin correo.
+        from django.apps import apps as registro_apps
+
+        migracion = importlib.import_module("apps.usuarios.migrations.0003_codigo_verificacion")
+        usuario = crear_usuario("vieja@mail.com", Rol.BENEFICIARIO, "1")
+        codigo = CodigoVerificacion.objects.create(
+            usuario=usuario, proposito="Recuperar contraseña", correo="", codigo_hash="x",
+            fecha_expiracion=timezone.now(),
+        )
+        migracion.completar_correo(registro_apps, None)
+        codigo.refresh_from_db()
+        self.assertEqual(codigo.correo, "vieja@mail.com")

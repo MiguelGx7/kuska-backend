@@ -1,5 +1,5 @@
 """
-Lógica de negocio de usuarios y autenticación (RN-01 a RN-04b).
+Lógica de negocio de usuarios y autenticación (RN-01 a RN-04d).
 
 Las vistas y serializers solo validan formato y llaman a estas funciones.
 """
@@ -16,14 +16,14 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.mail import send_mail
 from django.db import IntegrityError, transaction
 from django.utils import timezone
-from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
+from rest_framework.exceptions import APIException, AuthenticationFailed, PermissionDenied, ValidationError
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.sanciones.models import Sancion
 from config.correo import nombre_backend
 
-from .models import RecuperacionContrasena, Rol, Usuario
+from .models import CodigoVerificacion, Rol, Usuario
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,18 @@ MINUTOS_VIGENCIA_CODIGO = 15
 MAX_INTENTOS_CODIGO = 5
 MENSAJE_RECUPERACION = "Si el correo está registrado, te enviamos un código."
 MENSAJE_CODIGO_INVALIDO = "El código no es válido o ya venció. Solicita uno nuevo si es necesario."
+MENSAJE_CODIGO_REGISTRO = "Te enviamos un código a tu correo para crear la cuenta. Vence en 15 minutos."
+MENSAJE_CORREO_REGISTRADO = "Ya existe una cuenta con este correo."
+
+Proposito = CodigoVerificacion.Proposito
+
+
+class CorreoNoEnviado(APIException):
+    """El código de registro no se pudo enviar: sin él no hay forma de crear la cuenta."""
+
+    status_code = 503
+    default_detail = "No pudimos enviar el correo con el código. Inténtalo de nuevo en unos minutos."
+    default_code = "correo_no_enviado"
 
 
 def normalizar_correo(correo):
@@ -76,8 +88,11 @@ def _validar_datos_donante(nombre_rol, datos):
         raise ValidationError(errores)
 
 
-def registrar_usuario(datos):
-    """Crea un Donante o Beneficiario. No inicia sesión."""
+def _preparar_usuario(datos):
+    """
+    Valida todos los datos del registro (RN-01, RN-02 y contraseña) y devuelve el
+    usuario SIN guardar, con la contraseña ya cifrada. No toca ningún código.
+    """
     datos = dict(datos)
     contrasena = datos.pop("contrasena")
     nombre_rol = datos.pop("rol")
@@ -94,7 +109,7 @@ def registrar_usuario(datos):
 
     errores = {}
     if Usuario.objects.filter(correo__iexact=datos["correo"]).exists():
-        errores["correo"] = ["Ya existe una cuenta con este correo."]
+        errores["correo"] = [MENSAJE_CORREO_REGISTRADO]
     if Usuario.objects.filter(numero_documento=datos["numero_documento"]).exists():
         errores["numero_documento"] = ["Ya existe una cuenta con este número de documento."]
     if datos["nit"] and Usuario.objects.filter(nit=datos["nit"]).exists():
@@ -105,13 +120,92 @@ def registrar_usuario(datos):
     usuario = Usuario(rol=Rol.objects.get(nombre=nombre_rol), **datos)
     _validar_contrasena(contrasena, usuario, "contrasena")
     usuario.set_password(contrasena)
+    return usuario
 
+
+def _guardar_usuario(usuario):
     try:
         with transaction.atomic():
             usuario.save()
     except IntegrityError:
         # Dos registros simultáneos con el mismo correo, documento o NIT.
         raise ValidationError("Ya existe una cuenta con este correo, documento o NIT.")
+    return usuario
+
+
+def crear_usuario(datos):
+    """
+    Crea un Donante o Beneficiario SIN código de verificación. Solo para usos
+    internos (cargar_demo); el registro público usa registrar_usuario().
+    """
+    return _guardar_usuario(_preparar_usuario(datos))
+
+
+def solicitar_codigo_registro(correo):
+    """
+    RN-04d, paso 1: envía un código de 6 dígitos al correo con el que se quiere
+    crear la cuenta. Si el correo ya está registrado, el mismo error que el
+    registro (RN-02). No crea ningún usuario.
+    """
+    correo = normalizar_correo(correo)
+    if Usuario.objects.filter(correo__iexact=correo).exists():
+        raise ValidationError({"correo": [MENSAJE_CORREO_REGISTRADO]})
+
+    try:
+        with transaction.atomic():
+            codigo = _nuevo_codigo(Proposito.REGISTRO, correo)
+            # Si el envío falla se deshace todo: un código que nadie recibió no debe quedar.
+            send_mail(
+                subject="Kumora: tu código para crear la cuenta",
+                message=(
+                    "Hola.\n\n"
+                    f"Tu código para crear tu cuenta en Kumora es: {codigo}\n\n"
+                    f"Vence en {MINUTOS_VIGENCIA_CODIGO} minutos. "
+                    "Si no lo pediste, ignora este correo.\n\n"
+                    "Kumora - Red de Alimentos Solidarios"
+                ),
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[correo],
+            )
+    except Exception:
+        logger.exception("No se pudo enviar el código de registro a %s.", _enmascarar_correo(correo))
+        raise CorreoNoEnviado()
+    logger.info(
+        "Código de registro enviado a %s (%s).", _enmascarar_correo(correo), nombre_backend(settings.EMAIL_BACKEND)
+    )
+
+
+def registrar_usuario(datos):
+    """
+    RN-04d, paso 2: crea un Donante o Beneficiario si el código de registro de su
+    correo es válido. Primero se validan todos los datos (no gastan intentos) y
+    luego el código. Si el código falla, un único mensaje genérico (como RN-04b)
+    y no se crea nada. Devuelve el usuario; la vista entrega los tokens.
+    """
+    datos = dict(datos)
+    codigo = datos.pop("codigo")
+    usuario = _preparar_usuario(datos)
+
+    # El error del código se lanza fuera de la transacción para que el intento
+    # fallido sí quede guardado (igual que en la recuperación).
+    codigo_valido = False
+    with transaction.atomic():
+        # Solo se bloquea el código: el usuario todavía no existe. Que no se creen
+        # dos cuentas con el mismo correo lo garantiza el índice único de correo.
+        registro = (
+            CodigoVerificacion.objects.select_for_update()
+            .filter(correo=usuario.correo, proposito=Proposito.REGISTRO, usado=False)
+            .order_by("-fecha_creacion")
+            .first()
+        )
+        if _revisar_codigo(registro, codigo):
+            codigo_valido = True
+            _guardar_usuario(usuario)
+            registro.usado = True
+            registro.save(update_fields=["usado"])
+
+    if not codigo_valido:
+        raise ValidationError({"codigo": [MENSAJE_CODIGO_INVALIDO]})
     return usuario
 
 
@@ -192,9 +286,14 @@ def iniciar_sesion(correo, contrasena):
     if motivo:
         raise PermissionDenied(motivo)
 
+    return usuario, emitir_tokens(usuario)
+
+
+def emitir_tokens(usuario):
+    """Refresh token (con su access) para el usuario; lo usan el login y el registro."""
     refresh = RefreshToken.for_user(usuario)
     update_last_login(None, usuario)
-    return usuario, refresh
+    return refresh
 
 
 def validar_usuario_para_refresh(user_id):
@@ -250,6 +349,47 @@ def cambiar_contrasena(usuario, contrasena_actual, contrasena_nueva):
 
 
 # ---------------------------------------------------------------------
+# Códigos de verificación (RN-04b recuperar contraseña, RN-04d registro)
+# ---------------------------------------------------------------------
+def _nuevo_codigo(proposito, correo, usuario=None):
+    """
+    Invalida los códigos sin usar del mismo propósito (del usuario o, en el
+    registro, del correo), crea uno nuevo y devuelve el código en claro solo para
+    enviarlo: en la base queda su hash.
+    """
+    codigo = f"{secrets.randbelow(10**6):06d}"
+    anteriores = CodigoVerificacion.objects.filter(proposito=proposito, usado=False)
+    anteriores = anteriores.filter(usuario=usuario) if usuario else anteriores.filter(correo=correo)
+    anteriores.update(usado=True)
+    CodigoVerificacion.objects.create(
+        usuario=usuario,
+        proposito=proposito,
+        correo=correo,
+        codigo_hash=make_password(codigo),
+        fecha_expiracion=timezone.now() + timedelta(minutes=MINUTOS_VIGENCIA_CODIGO),
+    )
+    return codigo
+
+
+def _revisar_codigo(registro, codigo):
+    """
+    Con la fila del código ya bloqueada: True si sirve. Vencido, usado o sin
+    intentos: False. Si no coincide, suma un intento (máximo 5).
+    """
+    if (
+        registro is None
+        or registro.fecha_expiracion <= timezone.now()
+        or registro.intentos >= MAX_INTENTOS_CODIGO
+    ):
+        return False
+    if not check_password(codigo, registro.codigo_hash):
+        registro.intentos += 1
+        registro.save(update_fields=["intentos"])
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------
 # Recuperar contraseña (RN-04b)
 # ---------------------------------------------------------------------
 def _enviar_codigo(usuario, codigo):
@@ -297,15 +437,9 @@ def solicitar_recuperacion(correo):
         )
         return
 
-    codigo = f"{secrets.randbelow(10**6):06d}"
     with transaction.atomic():
-        # Pedir un código nuevo invalida los anteriores.
-        RecuperacionContrasena.objects.filter(usuario=usuario, usado=False).update(usado=True)
-        RecuperacionContrasena.objects.create(
-            usuario=usuario,
-            codigo_hash=make_password(codigo),
-            fecha_expiracion=timezone.now() + timedelta(minutes=MINUTOS_VIGENCIA_CODIGO),
-        )
+        # Pedir un código nuevo invalida los anteriores de recuperación del usuario.
+        codigo = _nuevo_codigo(Proposito.RECUPERAR_CONTRASENA, usuario.correo, usuario)
     _enviar_codigo(usuario, codigo)
 
 
@@ -333,22 +467,14 @@ def confirmar_recuperacion(correo, codigo, contrasena_nueva):
     with transaction.atomic():
         # Regla 6: primero el usuario (luego se le cambia la contraseña), después su código.
         Usuario.objects.select_for_update().get(pk=usuario.pk)
+        # Solo códigos de recuperación: uno de registro no sirve aquí.
         recuperacion = (
-            RecuperacionContrasena.objects.select_for_update()
-            .filter(usuario=usuario, usado=False)
+            CodigoVerificacion.objects.select_for_update()
+            .filter(usuario=usuario, proposito=Proposito.RECUPERAR_CONTRASENA, usado=False)
             .order_by("-fecha_creacion")
             .first()
         )
-        if (
-            recuperacion is None
-            or recuperacion.fecha_expiracion <= timezone.now()
-            or recuperacion.intentos >= MAX_INTENTOS_CODIGO
-        ):
-            pass
-        elif not check_password(codigo, recuperacion.codigo_hash):
-            recuperacion.intentos += 1
-            recuperacion.save(update_fields=["intentos"])
-        else:
+        if _revisar_codigo(recuperacion, codigo):
             codigo_valido = True
             # Con el código correcto ya se puede revisar la similitud con
             # los datos del usuario; si falla, el código no se gasta.

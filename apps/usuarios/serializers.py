@@ -46,7 +46,9 @@ class UsuarioBasicoSerializer(serializers.ModelSerializer):
 # ---------------------------------------------------------------------
 # Registro
 # ---------------------------------------------------------------------
-class RegistroSerializer(serializers.Serializer):
+class DatosRegistroSerializer(serializers.Serializer):
+    """Datos de la cuenta (sin código). También lo usa cargar_demo."""
+
     correo = serializers.EmailField(max_length=120)
     contrasena = serializers.CharField(max_length=128, **CAMPO_CONTRASENA)
     rol = serializers.ChoiceField(
@@ -81,6 +83,26 @@ class RegistroSerializer(serializers.Serializer):
         allow_blank=True,
         allow_null=True,
         help_text="Solo si tipo_donante es Negocio.",
+    )
+
+
+class RegistroSerializer(DatosRegistroSerializer):
+    """Registro público (RN-04d): los datos más el código que llegó al correo."""
+
+    codigo = serializers.RegexField(
+        r"^\d{6}$",
+        help_text="Código de 6 dígitos enviado con auth/registro/solicitar-codigo/.",
+        error_messages={
+            "invalid": "El código debe tener 6 dígitos.",
+            "required": "Escribe el código que te enviamos al correo.",
+        },
+    )
+
+
+class SolicitarCodigoRegistroSerializer(serializers.Serializer):
+    correo = serializers.EmailField(
+        max_length=120,
+        error_messages={"invalid": "Escribe un correo válido.", "required": "El correo es obligatorio."},
     )
 
 

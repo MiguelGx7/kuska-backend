@@ -4,19 +4,20 @@ Cada regla de [CLAUDE.md](../CLAUDE.md) (sección 6) y las pruebas que la verifi
 
 Para correr solo las pruebas de una regla, se usa la ruta completa: `python manage.py test apps.solicitudes.tests.AprobarSolicitudTests`.
 
-Total: **301 pruebas**. Las 4 pruebas marcadas con ★ se agregaron en el Paso 13 para cubrir partes de una regla que no tenían prueba (una de ellas aparece en dos filas: RN-28 y RN-50).
+Total: **341 pruebas**. Las 4 pruebas marcadas con ★ se agregaron en el Paso 13 para cubrir partes de una regla que no tenían prueba (una de ellas aparece en dos filas: RN-28 y RN-50).
 
 ## Usuarios y acceso
 
 | Regla | Qué se verifica | Pruebas |
 |---|---|---|
-| RN-01 | El registro solo crea Donante o Beneficiario; el Administrador se crea por consola con su rol | usuarios · `RegistroTests.test_rechaza_rol_administrador`, `test_registra_beneficiario_sin_datos_de_donante`, ★ `test_rn01_el_administrador_se_crea_por_consola_con_su_rol` |
+| RN-01 | El registro solo crea Donante o Beneficiario, y solo con el correo verificado; el Administrador se crea por consola con su rol | usuarios · `RegistroTests.test_rechaza_rol_administrador`, `test_registra_beneficiario_sin_datos_de_donante`, ★ `test_rn01_el_administrador_se_crea_por_consola_con_su_rol` , `RegistroConCodigoTests.test_crear_usuario_directo_no_pide_codigo` |
 | RN-02 | Correo y documento únicos; datos de donante según el tipo | usuarios · `RegistroTests.test_correo_y_documento_unicos`, `test_registra_donante_negocio_sin_devolver_contrasena`, `test_negocio_exige_nombre_y_nit`, `test_donante_exige_tipo_donante`, `test_persona_no_lleva_nit`, `test_beneficiario_no_lleva_datos_de_donante`, `test_aplica_validaciones_de_contrasena` |
 | RN-03 | Login: inactivo no entra; bloqueado dice hasta cuándo; el bloqueo vencido se levanta | usuarios · `LoginTests` (todas), `RefreshTests.test_rechaza_usuario_bloqueado`, `PermisosTests.test_es_usuario_activo_rechaza_bloqueado_con_token_valido`; sanciones · `EstadoYVencimientoTests.test_rn03_login_con_bloqueo_real_y_al_vencer`, `test_rn03_permanente_no_entra`, `LevantarBloqueosVencidosTests.test_bloqueado_vencido_pasa_a_activo_aunque_no_entre` |
 | RN-04 | Solo Activo ↔ Inactivo; no se cambia el estado de un Administrador ni el propio | usuarios · `CambiarEstadoTests.test_no_se_aplica_a_otro_administrador`, `test_no_se_aplica_a_uno_mismo`, `test_solo_activo_o_inactivo`, `test_ya_activo`, `test_bloqueado_no_se_activa_desde_aqui`, `test_inactivar_invalida_refresh_y_corta_el_acceso` |
 | RN-04a | Perfil: solo nombres, apellidos, teléfono, dirección y contraseña | usuarios · `PerfilTests` (todas), `CambiarContrasenaTests` (todas) |
 | RN-04b | Recuperar contraseña con código: respuesta uniforme, hash, 15 min, 5 intentos | usuarios · `RecuperarContrasenaTests` (todas) |
 | RN-04c | El admin corrige correo y teléfono; el correo sigue único | usuarios · `AdminUsuarioTests.test_corregir_correo_y_telefono`, `test_correo_debe_seguir_siendo_unico`, `test_puede_dejar_su_mismo_correo`, `test_solo_correo_y_telefono_son_editables` |
+| RN-04d | Registro con código por correo: pedir código (correo libre o ya registrado, envío fallido), registrar con código válido, inválido, vencido, sin intentos, usado, de otro correo o de otro propósito; no se crea nada si falla; los datos se validan antes; límite 5/min | usuarios · `RegistroConCodigoTests` (todas), `RegistroTests` (todas, ahora con código), `MigracionCodigoVerificacionTests` |
 
 ## Sanciones
 
