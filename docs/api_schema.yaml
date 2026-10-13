@@ -1579,12 +1579,13 @@ paths:
           * `Entregada` - Entregada
           * `No recogida` - No Recogida
           * `Cancelada` - Cancelada
-      - name: ordering
-        required: false
-        in: query
-        description: Qué campo usar para ordenar los resultados.
+      - in: query
+        name: ordering
         schema:
           type: string
+        description: 'Campos: fecha_solicitud, estado, fecha_limite_recogida, entrega__fecha_entrega.
+          Con - delante, descendente (ej. -entrega__fecha_entrega: entregas más recientes
+          primero, junto con ?estado=Entregada). Por defecto: -fecha_solicitud.'
       - name: page
         required: false
         in: query

@@ -1,5 +1,5 @@
 from django.db.models import Prefetch
-from drf_spectacular.utils import extend_schema, extend_schema_view
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -190,6 +190,17 @@ class MisSolicitudesViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vi
             "Búsqueda por código, correo o documento del beneficiario."
             " Antes de listar aplica los vencimientos (RN-50) a los registros que estén vencidos."
         ),
+        parameters=[
+            OpenApiParameter(
+                "ordering",
+                str,
+                description=(
+                    "Campos: fecha_solicitud, estado, fecha_limite_recogida, entrega__fecha_entrega. "
+                    "Con - delante, descendente (ej. -entrega__fecha_entrega: entregas más recientes "
+                    "primero, junto con ?estado=Entregada). Por defecto: -fecha_solicitud."
+                ),
+            )
+        ],
     ),
     retrieve=extend_schema(summary="Ver una solicitud", description="Con sus detalles, el beneficiario, quién la gestionó y la entrega si existe."),
 )
@@ -199,7 +210,7 @@ class AdminSolicitudViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = AdminSolicitudSerializer
     filterset_class = AdminSolicitudFilter
     search_fields = ["codigo_pedido", "beneficiario__correo", "beneficiario__numero_documento"]
-    ordering_fields = ["fecha_solicitud", "estado", "fecha_limite_recogida"]
+    ordering_fields = ["fecha_solicitud", "estado", "fecha_limite_recogida", "entrega__fecha_entrega"]
 
     def get_queryset(self):
         return _solicitudes_con_detalle(

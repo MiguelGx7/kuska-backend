@@ -466,6 +466,25 @@ class BaseGestionTest(BaseCarritoTest):
 
 
 class AdminSolicitudListadoTests(BaseGestionTest):
+    def test_ordenar_por_fecha_de_entrega(self):
+        ahora = timezone.now()
+        vieja = self.crear_solicitud(self.d1, [(self.arroz, "1")], estado="Entregada", codigo="KUM-20261012-0001")
+        nueva = self.crear_solicitud(self.d2, [(self.panela, "1")], estado="Entregada", codigo="KUM-20261012-0002")
+        # La vieja se pidió antes pero se entregó después.
+        for solicitud, pedida, entregada in ((vieja, 10, 1), (nueva, 2, 5)):
+            Solicitud.objects.filter(pk=solicitud.pk).update(fecha_solicitud=ahora - timedelta(days=pedida))
+            Entrega.objects.create(solicitud=solicitud, registrada_por=self.admin)
+            Entrega.objects.filter(solicitud=solicitud).update(fecha_entrega=ahora - timedelta(days=entregada))
+
+        def ids(**params):
+            r = self.cliente_admin.get("/api/admin/solicitudes/", {"estado": "Entregada", **params})
+            self.assertEqual(r.status_code, 200)
+            return [x["id"] for x in r.data["results"]]
+
+        self.assertEqual(ids(ordering="-entrega__fecha_entrega"), [vieja.pk, nueva.pk])  # más recientes primero
+        self.assertEqual(ids(ordering="entrega__fecha_entrega"), [nueva.pk, vieja.pk])
+        self.assertEqual(ids(), [nueva.pk, vieja.pk])  # por defecto manda la fecha de la solicitud
+
     def test_solo_administradores(self):
         self.assertEqual(self.cb.get("/api/admin/solicitudes/").status_code, 403)
         self.assertEqual(self.cliente.get("/api/admin/solicitudes/").status_code, 403)
