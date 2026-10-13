@@ -12,7 +12,7 @@ from collections import OrderedDict
 from datetime import datetime, time, timedelta
 
 from django.db import IntegrityError, transaction
-from django.db.models import Exists, OuterRef, Q
+from django.db.models import Exists, F, OuterRef, Q
 from django.db.models.functions import Length
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, ValidationError
@@ -749,7 +749,8 @@ def registrar_entrega(usuario, solicitud_id, observacion=None, solo_donante=Fals
             Notificacion.Tipo.SOLICITUD_ENTREGADA,
             "Tu solicitud fue entregada",
             f"Se registró la entrega de tu solicitud {solicitud.codigo_pedido} de "
-            f"«{solicitud.donacion.titulo}».",
+            f"«{solicitud.donacion.titulo}». ¿Recibiste tu pedido? Confírmalo en la app antes "
+            f"de {texto_fecha(entrega.confirmar_hasta)}.",
             solicitud=solicitud,
         )
     return entrega
@@ -767,7 +768,7 @@ def solicitudes_recibidas(donacion):
     """
     detalles = (
         DetalleSolicitud.objects.filter(solicitud__donacion=donacion)
-        .select_related("solicitud__beneficiario")
+        .select_related("solicitud__beneficiario", "solicitud__entrega")
         .order_by("solicitud__fecha_solicitud", "id")
     )
     por_alimento = OrderedDict(
@@ -792,3 +793,123 @@ def solicitudes_recibidas(donacion):
             },
         })
     return list(por_alimento.values())
+
+
+# =====================================================================
+# Paso 17: confirmación de la entrega por el beneficiario (RN-26b)
+# Orden de bloqueos (regla 6): solicitud -> entrega.
+# =====================================================================
+Confirmacion = Entrega.EstadoConfirmacion
+
+
+def asumir_entregas_vencidas(entregas=None):
+    """
+    RN-26b/RN-50: las confirmaciones Pendiente con más de 48 h pasan a Asumida
+    (se dan por recibidas). Un solo UPDATE condicional, en su transacción: es
+    idempotente y no tiene efectos por fila (no notifica a nadie). Solo toca filas
+    de entrega, así que no choca con el orden de bloqueos. Como fecha queda el fin
+    del plazo, sea cual sea el momento en que se procesó. Devuelve cuántas cambió.
+    """
+    limite = timezone.now() - timedelta(hours=Entrega.HORAS_PARA_CONFIRMAR)
+    entregas = Entrega.objects.all() if entregas is None else entregas
+    ids = list(
+        entregas.filter(estado_confirmacion=Confirmacion.PENDIENTE, fecha_entrega__lte=limite)
+        .values_list("id", flat=True)
+    )
+    if not ids:
+        return 0
+    with transaction.atomic():
+        return Entrega.objects.filter(
+            pk__in=ids, estado_confirmacion=Confirmacion.PENDIENTE, fecha_entrega__lte=limite
+        ).update(
+            estado_confirmacion=Confirmacion.ASUMIDA,
+            fecha_confirmacion=F("fecha_entrega") + timedelta(hours=Entrega.HORAS_PARA_CONFIRMAR),
+        )
+
+
+def _bloquear_entrega(solicitud):
+    return Entrega.objects.select_for_update().filter(solicitud=solicitud).first()
+
+
+def confirmar_entrega(beneficiario, solicitud_id, recibido, comentario=None):
+    """
+    RN-26b: el beneficiario dueño responde una sola vez, dentro de las 48 h:
+    Recibido -> Confirmada; No recibido -> Reclamada (comentario obligatorio,
+    se avisa a los administradores y al donante). La solicitud sigue Entregada.
+    """
+    comentario = (comentario or "").strip() or None
+    if not recibido and not comentario:
+        raise ValidationError({"comentario": ["Cuéntanos qué pasó: el comentario es obligatorio si no recibiste el pedido."]})
+
+    # Si el plazo ya venció, primero queda Asumida (en su propia transacción).
+    asumir_entregas_vencidas(Entrega.objects.filter(solicitud_id=solicitud_id))
+    with transaction.atomic():
+        solicitud = _bloquear_solicitud(solicitud_id, beneficiario=beneficiario)  # ajena -> 404
+        if solicitud.estado != Solicitud.Estado.ENTREGADA:
+            raise ValidationError(
+                f"Solo puedes confirmar la entrega de una solicitud Entregada; esta está {solicitud.estado}."
+            )
+        entrega = _bloquear_entrega(solicitud)
+        if entrega.estado_confirmacion == Confirmacion.ASUMIDA:
+            raise ValidationError(
+                f"El plazo para responder venció el {texto_fecha(entrega.confirmar_hasta)}: "
+                "la entrega se dio por recibida."
+            )
+        if entrega.estado_confirmacion != Confirmacion.PENDIENTE:
+            raise ValidationError(f"Ya respondiste sobre esta entrega (estado: {entrega.estado_confirmacion}).")
+        ahora = timezone.now()
+        if ahora > entrega.confirmar_hasta:  # por si venció entre la revisión y el bloqueo
+            raise ValidationError(f"El plazo para responder venció el {texto_fecha(entrega.confirmar_hasta)}.")
+
+        entrega.estado_confirmacion = Confirmacion.CONFIRMADA if recibido else Confirmacion.RECLAMADA
+        entrega.fecha_confirmacion = ahora
+        entrega.comentario_beneficiario = comentario
+        entrega.save(update_fields=["estado_confirmacion", "fecha_confirmacion", "comentario_beneficiario"])
+
+        if not recibido:
+            titulo = solicitud.donacion.titulo
+            mensaje = (
+                f"{beneficiario.nombre_para_mostrar} dice que no recibió el pedido {solicitud.codigo_pedido} "
+                f"de «{titulo}». Comentario: {comentario}"
+            )
+            notificar_administradores(
+                Notificacion.Tipo.ENTREGA_RECLAMADA, "Reclamo de una entrega", mensaje, solicitud=solicitud
+            )
+            crear_notificacion(
+                solicitud.donacion.donante,
+                Notificacion.Tipo.ENTREGA_RECLAMADA,
+                "Reclamaron una entrega de tu donación",
+                mensaje,
+                solicitud=solicitud,
+            )
+    return entrega
+
+
+def revisar_reclamo(admin, solicitud_id, respuesta):
+    """
+    RN-26b: el administrador responde un reclamo (respuesta obligatoria) y pasa a
+    Revisada. No sanciona por sí solo: si corresponde, se sanciona aparte con la
+    solicitud (RN-05, RN-07). Avisa al beneficiario y al donante con la respuesta.
+    """
+    with transaction.atomic():
+        solicitud = _bloquear_solicitud(solicitud_id)
+        entrega = _bloquear_entrega(solicitud)
+        if entrega is None or entrega.estado_confirmacion != Confirmacion.RECLAMADA:
+            estado = entrega.estado_confirmacion if entrega else "sin entrega"
+            raise ValidationError(f"Solo se revisan entregas reclamadas; esta está {estado}.")
+
+        entrega.estado_confirmacion = Confirmacion.REVISADA
+        entrega.respuesta_admin = respuesta
+        entrega.revisada_por = admin
+        entrega.fecha_revision = timezone.now()
+        entrega.save(update_fields=["estado_confirmacion", "respuesta_admin", "revisada_por", "fecha_revision"])
+
+        texto = (
+            f"El administrador revisó el reclamo del pedido {solicitud.codigo_pedido} de "
+            f"«{solicitud.donacion.titulo}». Respuesta: {respuesta}"
+        )
+        for destinatario in (solicitud.beneficiario, solicitud.donacion.donante):
+            crear_notificacion(
+                destinatario, Notificacion.Tipo.RECLAMO_REVISADO, "Reclamo revisado", texto, solicitud=solicitud
+            )
+    return entrega

@@ -1538,6 +1538,24 @@ paths:
           type: string
         description: 'Ej.: KUM-20261012-0001'
       - in: query
+        name: confirmacion
+        schema:
+          type: string
+          enum:
+          - Asumida
+          - Confirmada
+          - Pendiente
+          - Reclamada
+          - Revisada
+        description: |-
+          Confirmación de la entrega (RN-26b). Ej.: Reclamada para ver los reclamos por revisar.
+
+          * `Pendiente` - Pendiente
+          * `Confirmada` - Confirmada
+          * `Asumida` - Asumida
+          * `Reclamada` - Reclamada
+          * `Revisada` - Revisada
+      - in: query
         name: donacion
         schema:
           type: number
@@ -1895,6 +1913,108 @@ paths:
           multipart/form-data:
             schema:
               $ref: '#/components/schemas/RechazarSolicitudRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminSolicitud'
+          description: ''
+        '400':
+          description: Datos inválidos o la regla de negocio no permite la acción.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorValidacion'
+              examples:
+                por_campo:
+                  summary: Error en un campo
+                  value:
+                    motivo_rechazo:
+                    - Debes indicar el motivo del rechazo.
+                regla:
+                  summary: Regla de negocio
+                  value:
+                  - 'No se puede aprobar: la solicitud está Cancelada y debe estar
+                    Pendiente.'
+        '401':
+          description: Sin token, token vencido o credenciales incorrectas.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                sin_token:
+                  summary: Sin token
+                  value:
+                    detail: Las credenciales de autenticación no se proveyeron.
+                credenciales:
+                  summary: Login fallido
+                  value:
+                    detail: Correo o contraseña incorrectos.
+        '403':
+          description: La cuenta no está activa o el rol no tiene permiso.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                rol:
+                  summary: Rol sin permiso
+                  value:
+                    detail: Esta acción es solo para administradores.
+                bloqueado:
+                  summary: Cuenta bloqueada
+                  value:
+                    detail: Tu cuenta está bloqueada hasta el 20/10/2026 a las 18:30.
+        '404':
+          description: No existe o no es del usuario (no se revela que existe).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                no_encontrado:
+                  summary: No encontrado
+                  value:
+                    detail: No encontramos esa solicitud.
+  /api/admin/solicitudes/{id}/revisar-reclamo/:
+    post:
+      operationId: admin_solicitudes_revisar_reclamo_create
+      description: 'Solo si la confirmación está Reclamada. La respuesta es obligatoria;
+        pasa a Revisada y se notifica al beneficiario y al donante. No sanciona: si
+        corresponde, se sanciona aparte en admin/sanciones/ con la solicitud (RN-05,
+        RN-07). La solicitud sigue Entregada.'
+      summary: Revisar el reclamo de una entrega (RN-26b)
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: Un valor de entero único que identifique este solicitud.
+        required: true
+      tags:
+      - Admin - Solicitudes
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevisarReclamoRequest'
+            examples:
+              revisar:
+                summary: Responder
+                value:
+                  respuesta_admin: El donante confirmó que no pudo ir; ya hablamos
+                    con él.
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/RevisarReclamoRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/RevisarReclamoRequest'
         required: true
       security:
       - jwtAuth: []
@@ -4627,6 +4747,112 @@ paths:
                   summary: No encontrado
                   value:
                     detail: No encontramos esa solicitud.
+  /api/mis-solicitudes/{id}/confirmar-entrega/:
+    post:
+      operationId: mis_solicitudes_confirmar_entrega_create
+      description: Solo sobre una solicitud Entregada propia, una vez y dentro de
+        las 48 horas siguientes a la entrega (ver entrega.confirmar_hasta). recibido=true
+        la confirma; recibido=false la reclama (comentario obligatorio) y se avisa
+        a los administradores y al donante. La solicitud sigue Entregada.
+      summary: Confirmar si recibí el pedido (RN-26b)
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: Un valor de entero único que identifique este solicitud.
+        required: true
+      tags:
+      - Beneficiario - Solicitudes
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmarEntregaRequest'
+            examples:
+              recibido:
+                summary: Lo recibí
+                value:
+                  recibido: true
+              reclamo:
+                summary: No lo recibí
+                value:
+                  recibido: false
+                  comentario: Nadie llegó a la dirección acordada.
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ConfirmarEntregaRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ConfirmarEntregaRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MiSolicitud'
+          description: ''
+        '400':
+          description: Datos inválidos o la regla de negocio no permite la acción.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorValidacion'
+              examples:
+                por_campo:
+                  summary: Error en un campo
+                  value:
+                    motivo_rechazo:
+                    - Debes indicar el motivo del rechazo.
+                regla:
+                  summary: Regla de negocio
+                  value:
+                  - 'No se puede aprobar: la solicitud está Cancelada y debe estar
+                    Pendiente.'
+        '401':
+          description: Sin token, token vencido o credenciales incorrectas.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                sin_token:
+                  summary: Sin token
+                  value:
+                    detail: Las credenciales de autenticación no se proveyeron.
+                credenciales:
+                  summary: Login fallido
+                  value:
+                    detail: Correo o contraseña incorrectos.
+        '403':
+          description: La cuenta no está activa o el rol no tiene permiso.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                rol:
+                  summary: Rol sin permiso
+                  value:
+                    detail: Esta acción es solo para administradores.
+                bloqueado:
+                  summary: Cuenta bloqueada
+                  value:
+                    detail: Tu cuenta está bloqueada hasta el 20/10/2026 a las 18:30.
+        '404':
+          description: No existe o no es del usuario (no se revela que existe).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                no_encontrado:
+                  summary: No encontrado
+                  value:
+                    detail: No encontramos esa solicitud.
   /api/notificaciones/:
     get:
       operationId: notificaciones_list
@@ -4664,11 +4890,13 @@ paths:
           - alimento_cancelado
           - donacion_rechazada
           - donacion_validada
+          - entrega_reclamada
           - novedad_aceptada
           - novedad_creada
           - novedad_rechazada
           - nueva_donacion
           - nueva_solicitud
+          - reclamo_revisado
           - sancion
           - solicitud_aprobada
           - solicitud_cancelada
@@ -4690,6 +4918,8 @@ paths:
           * `novedad_aceptada` - Novedad aceptada
           * `novedad_rechazada` - Novedad rechazada
           * `sancion` - Sanción
+          * `entrega_reclamada` - Entrega reclamada
+          * `reclamo_revisado` - Reclamo revisado
       tags:
       - Notificaciones
       security:
@@ -6041,6 +6271,69 @@ components:
       - actualizada_por
       - fecha_actualizacion
       - id
+    ConfirmacionEntrega:
+      type: object
+      description: Entrega con su confirmación (RN-26b), como la ve el beneficiario.
+      properties:
+        fecha_entrega:
+          type: string
+          format: date-time
+          readOnly: true
+        observacion:
+          type: string
+          readOnly: true
+          nullable: true
+        estado_confirmacion:
+          allOf:
+          - $ref: '#/components/schemas/EstadoConfirmacionEnum'
+          readOnly: true
+        confirmar_hasta:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Hasta cuándo puede responder el beneficiario (48 h desde la
+            entrega).
+        fecha_confirmacion:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        comentario_beneficiario:
+          type: string
+          readOnly: true
+          nullable: true
+        respuesta_admin:
+          type: string
+          readOnly: true
+          nullable: true
+        fecha_revision:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+      required:
+      - comentario_beneficiario
+      - confirmar_hasta
+      - estado_confirmacion
+      - fecha_confirmacion
+      - fecha_entrega
+      - fecha_revision
+      - observacion
+      - respuesta_admin
+    ConfirmarEntregaRequest:
+      type: object
+      properties:
+        recibido:
+          type: boolean
+          description: true si recibiste el pedido; false si no (entonces el comentario
+            es obligatorio).
+        comentario:
+          type: string
+          nullable: true
+          description: 'Obligatorio si recibido es false: cuéntanos qué pasó.'
+          maxLength: 255
+      required:
+      - recibido
     Conteos:
       type: object
       description: Lo que cambia (o se informa) al aplicar la acción (RN-70 a RN-74).
@@ -6410,27 +6703,68 @@ components:
       - donacion
     Entrega:
       type: object
+      description: 'Para el administrador: además, quién registró y quién revisó.'
       properties:
         id:
           type: integer
-          readOnly: true
-        fecha_entrega:
-          type: string
-          format: date-time
           readOnly: true
         registrada_por:
           type: string
           format: email
           readOnly: true
+        fecha_entrega:
+          type: string
+          format: date-time
+          readOnly: true
         observacion:
           type: string
           readOnly: true
           nullable: true
+        estado_confirmacion:
+          allOf:
+          - $ref: '#/components/schemas/EstadoConfirmacionEnum'
+          readOnly: true
+        confirmar_hasta:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Hasta cuándo puede responder el beneficiario (48 h desde la
+            entrega).
+        fecha_confirmacion:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        comentario_beneficiario:
+          type: string
+          readOnly: true
+          nullable: true
+        respuesta_admin:
+          type: string
+          readOnly: true
+          nullable: true
+        fecha_revision:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        revisada_por:
+          type: string
+          format: email
+          readOnly: true
+          nullable: true
       required:
+      - comentario_beneficiario
+      - confirmar_hasta
+      - estado_confirmacion
+      - fecha_confirmacion
       - fecha_entrega
+      - fecha_revision
       - id
       - observacion
       - registrada_por
+      - respuesta_admin
+      - revisada_por
     EntregarRequest:
       type: object
       properties:
@@ -6453,6 +6787,20 @@ components:
       description: |-
         * `Activo` - Activo
         * `Inactivo` - Inactivo
+    EstadoConfirmacionEnum:
+      enum:
+      - Pendiente
+      - Confirmada
+      - Asumida
+      - Reclamada
+      - Revisada
+      type: string
+      description: |-
+        * `Pendiente` - Pendiente
+        * `Confirmada` - Confirmada
+        * `Asumida` - Asumida
+        * `Reclamada` - Reclamada
+        * `Revisada` - Revisada
     EstadoDonacionEnum:
       enum:
       - Pendiente
@@ -6708,6 +7056,11 @@ components:
           items:
             $ref: '#/components/schemas/DetalleSolicitud'
           readOnly: true
+        entrega:
+          allOf:
+          - $ref: '#/components/schemas/ConfirmacionEntrega'
+          nullable: true
+          readOnly: true
       required:
       - codigo_pedido
       - detalles
@@ -6715,6 +7068,7 @@ components:
       - donacion
       - donacion_titulo
       - donante
+      - entrega
       - estado
       - fecha_gestion
       - fecha_limite_recogida
@@ -7503,6 +7857,15 @@ components:
       - rol
       - telefono
       - tipo_documento
+    RevisarReclamoRequest:
+      type: object
+      properties:
+        respuesta_admin:
+          type: string
+          minLength: 1
+          maxLength: 255
+      required:
+      - respuesta_admin
     RolEnum:
       enum:
       - Donante
@@ -7605,12 +7968,19 @@ components:
           type: boolean
         beneficiario:
           $ref: '#/components/schemas/BeneficiarioContacto'
+        estado_confirmacion:
+          type: string
+          nullable: true
+          readOnly: true
+          description: 'Solo si fue Entregada: Pendiente, Confirmada, Asumida, Reclamada
+            o Revisada (RN-26b).'
       required:
       - beneficiario
       - cancelado
       - cantidad
       - codigo_pedido
       - estado
+      - estado_confirmacion
       - fecha_limite_recogida
       - fecha_solicitud
       - modalidad_entrega
@@ -7651,6 +8021,8 @@ components:
       - novedad_aceptada
       - novedad_rechazada
       - sancion
+      - entrega_reclamada
+      - reclamo_revisado
       type: string
       description: |-
         * `nueva_donacion` - Nueva donación
@@ -7667,6 +8039,8 @@ components:
         * `novedad_aceptada` - Novedad aceptada
         * `novedad_rechazada` - Novedad rechazada
         * `sancion` - Sanción
+        * `entrega_reclamada` - Entrega reclamada
+        * `reclamo_revisado` - Reclamo revisado
     TipoSancionEnum:
       enum:
       - Advertencia

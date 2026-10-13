@@ -4,7 +4,7 @@ Cada regla de [CLAUDE.md](../CLAUDE.md) (sección 6) y las pruebas que la verifi
 
 Para correr solo las pruebas de una regla, se usa la ruta completa: `python manage.py test apps.solicitudes.tests.AprobarSolicitudTests`.
 
-Total: **341 pruebas**. Las 4 pruebas marcadas con ★ se agregaron en el Paso 13 para cubrir partes de una regla que no tenían prueba (una de ellas aparece en dos filas: RN-28 y RN-50).
+Total: **360 pruebas**. Las 4 pruebas marcadas con ★ se agregaron en el Paso 13 para cubrir partes de una regla que no tenían prueba (una de ellas aparece en dos filas: RN-28 y RN-50).
 
 ## Usuarios y acceso
 
@@ -53,7 +53,8 @@ Total: **341 pruebas**. Las 4 pruebas marcadas con ★ se agregaron en el Paso 1
 | RN-23 | El beneficiario solo cancela Pendiente; devuelve cantidades | solicitudes · `MisSolicitudesTests.test_cancelar_devuelve_cantidades_y_recalcula`, `test_solo_cancela_pendientes`, `test_no_devuelve_detalles_cancelados`, `test_puede_volver_a_pedir_despues_de_cancelar` |
 | RN-24 | Aprobar: fecha límite = menor entre plazo y vencimiento; notifica con los datos de entrega | solicitudes · `AprobarSolicitudTests` (todas) |
 | RN-25 | Rechazar con motivo; devuelve cantidades; notifica | solicitudes · `RechazarSolicitudTests` (todas) |
-| RN-26 | Entrega total por el donante dueño o el admin; solo Aprobada | solicitudes · `EntregarSolicitudTests` (todas) |
+| RN-26 | Entrega total por el donante dueño o el admin; solo Aprobada | solicitudes · `EntregarSolicitudTests` (todas), `ConfirmacionEntregaTests.test_al_entregar_queda_pendiente_e_invita_a_confirmar` |
+| RN-26b | Confirmación del beneficiario: recibido, reclamo con y sin comentario, ajena (404), no Entregada, fuera de plazo, una sola vez, bloqueado; Asumida por el comando y antes de listar; el donante ve solo el estado; revisar reclamo (con y sin respuesta, no Reclamada, solo admin); filtro `confirmacion`; las 2 notificaciones; los CHECK; la migración | solicitudes · `ConfirmacionEntregaTests` (todas), `CargarDemoTests.test_carga_todos_los_estados_sin_duplicar_y_se_puede_borrar` |
 | RN-27 | Aprobada vencida → No recogida; devuelve lo no cancelado; notifica a ambos | solicitudes · `VencimientosTests.test_rn27_*`, `EntregarSolicitudTests.test_rn27_vencida_pasa_a_no_recogida_antes_de_entregar`, `ProcesarVencimientosComandoTests.test_aplica_todo_e_imprime_el_resumen` |
 | RN-28 | Pendiente vencida → Cancelada con motivo | solicitudes · `VencimientosTests.test_rn28_*`, `AprobarSolicitudTests.test_rn28_pendiente_vencida_se_cancela_antes_de_aprobar`, ★ `RechazarSolicitudTests.test_rn50_aplica_vencimientos_antes_de_rechazar` |
 | RN-29 | El beneficiario ve el contacto del donante solo desde Aprobada | solicitudes · `MisSolicitudesTests.test_rn29_en_pendiente_solo_el_nombre_del_donante`, `test_rn29_desde_aprobada_telefono_y_direccion` |
@@ -71,7 +72,7 @@ Total: **341 pruebas**. Las 4 pruebas marcadas con ★ se agregaron en el Paso 1
 
 | Regla | Qué se verifica | Pruebas |
 |---|---|---|
-| RN-40 | Los 14 tipos fijos | ★ notificaciones · `NotificacionServiceTests.test_rn40_tipos_fijos`. Cada tipo se verifica además en la prueba de la acción que lo genera (aprobar, rechazar, novedad, sanción...). |
+| RN-40 | Los 16 tipos fijos (14 + 2 de RN-26b) | ★ notificaciones · `NotificacionServiceTests.test_rn40_tipos_fijos`. Cada tipo se verifica además en la prueba de la acción que lo genera (aprobar, rechazar, novedad, sanción...). |
 | RN-41 | Solo las suyas; marcar una o todas como leídas | notificaciones · `NotificacionApiTests` (todas) |
 
 ## Vencimientos automáticos

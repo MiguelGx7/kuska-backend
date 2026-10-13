@@ -9,10 +9,12 @@ from apps.usuarios.permissions import PERMISOS_ADMIN, PERMISOS_BENEFICIARIO, PER
 
 from . import services
 from .filters import AdminSolicitudFilter
-from .models import DetalleSolicitud, Solicitud
+from .models import DetalleSolicitud, Entrega, Solicitud
 from .serializers import (
     AdminSolicitudSerializer,
     CarritoAgregarSerializer,
+    ConfirmarEntregaSerializer,
+    RevisarReclamoSerializer,
     EntregarSerializer,
     EntregaSerializer,
     RechazarSolicitudSerializer,
@@ -132,12 +134,15 @@ class MisSolicitudesViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vi
         if getattr(self, "swagger_fake_view", False):
             return Solicitud.objects.none()
         return _solicitudes_con_detalle(
-            Solicitud.objects.filter(beneficiario=self.request.user).order_by("-fecha_solicitud", "-id")
+            Solicitud.objects.filter(beneficiario=self.request.user)
+            .select_related("entrega")
+            .order_by("-fecha_solicitud", "-id")
         )
 
     def list(self, request, *args, **kwargs):
         # RN-50: antes de listar, solo las suyas que de verdad estén vencidas.
         services.procesar_solicitudes_vencidas(Solicitud.objects.filter(beneficiario=request.user))
+        services.asumir_entregas_vencidas(Entrega.objects.filter(solicitud__beneficiario=request.user))
         return super().list(request, *args, **kwargs)
 
     @extend_schema(
@@ -150,6 +155,27 @@ class MisSolicitudesViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vi
     def cancelar(self, request, pk=None):
         solicitud = self.get_object()
         services.cancelar_solicitud(request.user, solicitud.pk)
+        return Response(MiSolicitudSerializer(self.get_queryset().get(pk=solicitud.pk)).data)
+
+    @extend_schema(
+        summary="Confirmar si recibí el pedido (RN-26b)",
+        description=(
+            "Solo sobre una solicitud Entregada propia, una vez y dentro de las 48 horas siguientes a la "
+            "entrega (ver entrega.confirmar_hasta). recibido=true la confirma; recibido=false la reclama "
+            "(comentario obligatorio) y se avisa a los administradores y al donante. La solicitud sigue "
+            "Entregada."
+        ),
+        request=ConfirmarEntregaSerializer,
+        responses={200: MiSolicitudSerializer},
+    )
+    @action(detail=True, methods=["post"], url_path="confirmar-entrega")
+    def confirmar_entrega(self, request, pk=None):
+        solicitud = self.get_object()
+        serializer = ConfirmarEntregaSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        services.confirmar_entrega(
+            request.user, solicitud.pk, serializer.validated_data["recibido"], serializer.validated_data.get("comentario")
+        )
         return Response(MiSolicitudSerializer(self.get_queryset().get(pk=solicitud.pk)).data)
 
 
@@ -178,13 +204,14 @@ class AdminSolicitudViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         return _solicitudes_con_detalle(
             Solicitud.objects.select_related(
-                "beneficiario", "gestionada_por", "entrega__registrada_por"
+                "beneficiario", "gestionada_por", "entrega__registrada_por", "entrega__revisada_por"
             ).order_by("-fecha_solicitud", "-id")
         )
 
     def list(self, request, *args, **kwargs):
         # RN-50: solo las que de verdad están vencidas (una consulta las encuentra).
         services.procesar_solicitudes_vencidas(Solicitud.objects.all())
+        services.asumir_entregas_vencidas()
         return super().list(request, *args, **kwargs)
 
     def _respuesta(self, solicitud_id):
@@ -231,6 +258,24 @@ class AdminSolicitudViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = EntregarSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         services.registrar_entrega(request.user, solicitud.pk, serializer.validated_data.get("observacion"))
+        return self._respuesta(solicitud.pk)
+
+    @extend_schema(
+        summary="Revisar el reclamo de una entrega (RN-26b)",
+        description=(
+            "Solo si la confirmación está Reclamada. La respuesta es obligatoria; pasa a Revisada y se "
+            "notifica al beneficiario y al donante. No sanciona: si corresponde, se sanciona aparte en "
+            "admin/sanciones/ con la solicitud (RN-05, RN-07). La solicitud sigue Entregada."
+        ),
+        request=RevisarReclamoSerializer,
+        responses={200: AdminSolicitudSerializer},
+    )
+    @action(detail=True, methods=["post"], url_path="revisar-reclamo")
+    def revisar_reclamo(self, request, pk=None):
+        solicitud = self.get_object()
+        serializer = RevisarReclamoSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        services.revisar_reclamo(request.user, solicitud.pk, serializer.validated_data["respuesta_admin"])
         return self._respuesta(solicitud.pk)
 
 

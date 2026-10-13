@@ -101,19 +101,41 @@ class DonanteContactoSerializer(serializers.Serializer):
     direccion_recogida = serializers.CharField(allow_null=True)
 
 
+class ConfirmacionEntregaSerializer(serializers.ModelSerializer):
+    """Entrega con su confirmación (RN-26b), como la ve el beneficiario."""
+
+    confirmar_hasta = serializers.DateTimeField(
+        read_only=True, help_text="Hasta cuándo puede responder el beneficiario (48 h desde la entrega)."
+    )
+
+    class Meta:
+        model = Entrega
+        fields = (
+            "fecha_entrega", "observacion", "estado_confirmacion", "confirmar_hasta", "fecha_confirmacion",
+            "comentario_beneficiario", "respuesta_admin", "fecha_revision",
+        )
+        read_only_fields = fields
+
+
 class MiSolicitudSerializer(serializers.ModelSerializer):
     donacion_titulo = serializers.CharField(source="donacion.titulo", read_only=True)
     donante = serializers.SerializerMethodField()
     detalles = DetalleSolicitudSerializer(many=True, read_only=True)
+    entrega = serializers.SerializerMethodField()
 
     class Meta:
         model = Solicitud
         fields = (
             "id", "codigo_pedido", "estado", "modalidad_entrega", "direccion_entrega",
             "motivo_rechazo", "motivo_cancelacion", "fecha_solicitud", "fecha_gestion",
-            "fecha_limite_recogida", "donacion", "donacion_titulo", "donante", "detalles",
+            "fecha_limite_recogida", "donacion", "donacion_titulo", "donante", "detalles", "entrega",
         )
         read_only_fields = fields
+
+    @extend_schema_field(ConfirmacionEntregaSerializer(allow_null=True))
+    def get_entrega(self, obj):
+        entrega = getattr(obj, "entrega", None)
+        return ConfirmacionEntregaSerializer(entrega).data if entrega else None
 
     @extend_schema_field(DonanteContactoSerializer)
     def get_donante(self, obj):
@@ -135,13 +157,36 @@ class PedidoEnviadoSerializer(serializers.Serializer):
 # ---------------------------------------------------------------------
 # Gestión (Paso 7)
 # ---------------------------------------------------------------------
-class EntregaSerializer(serializers.ModelSerializer):
-    registrada_por = serializers.EmailField(source="registrada_por.correo", read_only=True)
+class EntregaSerializer(ConfirmacionEntregaSerializer):
+    """Para el administrador: además, quién registró y quién revisó."""
 
-    class Meta:
-        model = Entrega
-        fields = ("id", "fecha_entrega", "registrada_por", "observacion")
+    registrada_por = serializers.EmailField(source="registrada_por.correo", read_only=True)
+    revisada_por = serializers.EmailField(source="revisada_por.correo", read_only=True, allow_null=True, default=None)
+
+    class Meta(ConfirmacionEntregaSerializer.Meta):
+        fields = ("id", "registrada_por", *ConfirmacionEntregaSerializer.Meta.fields, "revisada_por")
         read_only_fields = fields
+
+
+class ConfirmarEntregaSerializer(serializers.Serializer):
+    recibido = serializers.BooleanField(
+        help_text="true si recibiste el pedido; false si no (entonces el comentario es obligatorio).",
+        error_messages={"required": "Indica si recibiste el pedido (recibido: true o false)."},
+    )
+    comentario = serializers.CharField(
+        max_length=255, required=False, allow_blank=True, allow_null=True,
+        help_text="Obligatorio si recibido es false: cuéntanos qué pasó.",
+    )
+
+
+class RevisarReclamoSerializer(serializers.Serializer):
+    respuesta_admin = serializers.CharField(
+        max_length=255,
+        error_messages={
+            "required": "Debes escribir la respuesta al reclamo.",
+            "blank": "Debes escribir la respuesta al reclamo.",
+        },
+    )
 
 
 class PersonaContactoSerializer(serializers.Serializer):
@@ -215,6 +260,13 @@ class SolicitudRecibidaSerializer(serializers.Serializer):
     cantidad = serializers.DecimalField(source="detalle.cantidad", max_digits=10, decimal_places=2)
     cancelado = serializers.BooleanField(source="detalle.cancelado")
     beneficiario = BeneficiarioContactoSerializer()
+    estado_confirmacion = serializers.SerializerMethodField(
+        help_text="Solo si fue Entregada: Pendiente, Confirmada, Asumida, Reclamada o Revisada (RN-26b)."
+    )
+
+    def get_estado_confirmacion(self, item) -> str | None:
+        entrega = getattr(item["solicitud"], "entrega", None)
+        return entrega.estado_confirmacion if entrega else None
 
 
 class AlimentoConSolicitudesSerializer(serializers.Serializer):

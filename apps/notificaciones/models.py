@@ -20,6 +20,8 @@ class Notificacion(models.Model):
         NOVEDAD_ACEPTADA = "novedad_aceptada", "Novedad aceptada"
         NOVEDAD_RECHAZADA = "novedad_rechazada", "Novedad rechazada"
         SANCION = "sancion", "Sanción"
+        ENTREGA_RECLAMADA = "entrega_reclamada", "Entrega reclamada"
+        RECLAMO_REVISADO = "reclamo_revisado", "Reclamo revisado"
 
     usuario = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="notificaciones"

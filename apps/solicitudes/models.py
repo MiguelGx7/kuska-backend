@@ -139,7 +139,21 @@ class DetalleSolicitud(models.Model):
 
 
 class Entrega(models.Model):
-    """Siempre total: no hay entregas parciales (RN-26)."""
+    """
+    Siempre total: no hay entregas parciales (RN-26). El beneficiario confirma si
+    la recibió (RN-26b); la solicitud sigue Entregada pase lo que pase.
+    """
+
+    # Plazo del beneficiario para responder, desde fecha_entrega (como DIAS_BLOQUEO_TEMPORAL:
+    # constante del sistema, no un valor de configuracion).
+    HORAS_PARA_CONFIRMAR = 48
+
+    class EstadoConfirmacion(models.TextChoices):
+        PENDIENTE = "Pendiente", "Pendiente"
+        CONFIRMADA = "Confirmada", "Confirmada"
+        ASUMIDA = "Asumida", "Asumida"
+        RECLAMADA = "Reclamada", "Reclamada"
+        REVISADA = "Revisada", "Revisada"
 
     solicitud = models.OneToOneField(
         Solicitud, on_delete=models.PROTECT, related_name="entrega"
@@ -152,11 +166,60 @@ class Entrega(models.Model):
     )
     fecha_entrega = models.DateTimeField(auto_now_add=True)
     observacion = models.CharField(max_length=255, null=True, blank=True)
+    # Confirmación del beneficiario (RN-26b).
+    estado_confirmacion = models.CharField(
+        max_length=10, choices=EstadoConfirmacion.choices, default=EstadoConfirmacion.PENDIENTE
+    )
+    fecha_confirmacion = models.DateTimeField(null=True, blank=True)
+    comentario_beneficiario = models.CharField(max_length=255, null=True, blank=True)
+    respuesta_admin = models.CharField(max_length=255, null=True, blank=True)
+    revisada_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        db_column="revisada_por",
+        related_name="reclamos_revisados",
+    )
+    fecha_revision = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "entrega"
         verbose_name = "entrega"
         verbose_name_plural = "entregas"
+        constraints = [
+            # Toda respuesta (o la suposición) queda con su fecha.
+            models.CheckConstraint(
+                name="chk_entrega_fecha_confirmacion",
+                condition=Q(estado_confirmacion="Pendiente") | Q(fecha_confirmacion__isnull=False),
+                violation_error_message="La confirmación necesita su fecha.",
+            ),
+            # Un reclamo (y su revisión) siempre tiene el comentario del beneficiario.
+            models.CheckConstraint(
+                name="chk_entrega_reclamo",
+                condition=~Q(estado_confirmacion__in=["Reclamada", "Revisada"])
+                | Q(comentario_beneficiario__isnull=False),
+                violation_error_message="El reclamo necesita el comentario del beneficiario.",
+            ),
+            # Revisada: respuesta, quién y cuándo.
+            models.CheckConstraint(
+                name="chk_entrega_revision",
+                condition=~Q(estado_confirmacion="Revisada")
+                | Q(respuesta_admin__isnull=False, revisada_por__isnull=False, fecha_revision__isnull=False),
+                violation_error_message="La revisión necesita respuesta, administrador y fecha.",
+            ),
+        ]
+        indexes = [
+            # Pendientes vencidas (RN-50) y reclamos por revisar.
+            models.Index(fields=["estado_confirmacion", "fecha_entrega"], name="idx_entrega_confirmacion"),
+        ]
+
+    @property
+    def confirmar_hasta(self):
+        """Hasta cuándo puede responder el beneficiario."""
+        from datetime import timedelta
+
+        return self.fecha_entrega + timedelta(hours=self.HORAS_PARA_CONFIRMAR)
 
     def __str__(self):
         return f"Entrega de {self.solicitud}"

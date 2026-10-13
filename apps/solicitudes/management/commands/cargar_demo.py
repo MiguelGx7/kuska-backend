@@ -213,6 +213,12 @@ class Command(BaseCommand):
             solicitudes.aprobar_solicitud(admin, s.pk)
         solicitudes.registrar_entrega(admin, s_pan_laura.pk, "Entregado completo.")
         solicitudes.registrar_entrega(ana, s_pan_jorge.pk, "Lo recogió en la portería.", solo_donante=True)
+        # RN-26b: Laura confirma que lo recibió; Jorge reclama (se avisa a los admins y a Ana).
+        solicitudes.confirmar_entrega(laura, s_pan_laura.pk, recibido=True)
+        solicitudes.confirmar_entrega(
+            jorge, s_pan_jorge.pk, recibido=False,
+            comentario="Solo me entregaron un paquete de pan, no el que pedí.",
+        )
 
         # --- Mercado de granos: rechazada, cancelada, no recogida y entregada ---
         arroz, frijol, aceite = (self.alimento(mercado, n) for n in ("Arroz", "Frijol", "Aceite"))
@@ -264,6 +270,8 @@ class Command(BaseCommand):
         self.mover_solicitud(s_no_recogida, 64, limite=61)
         Sancion.objects.filter(pk=sancion.pk).update(fecha_inicio=hace(60))
         self.mover_solicitud(s_entregada, 40, entrega=38)
+        # Laura no respondió por la entrega del arroz: pasadas las 48 h queda Asumida (RN-26b).
+        solicitudes.asumir_entregas_vencidas(Entrega.objects.filter(solicitud=s_entregada))
         self.mover_donacion(leche, 20)
         self.mover_donacion(frutas, 3)
 
@@ -295,6 +303,10 @@ class Command(BaseCommand):
         )
         if entrega is not None:
             Entrega.objects.filter(solicitud=solicitud).update(fecha_entrega=hace(entrega))
+            # La respuesta del beneficiario (si la hubo) queda unas horas después de la entrega.
+            Entrega.objects.filter(solicitud=solicitud, fecha_confirmacion__isnull=False).update(
+                fecha_confirmacion=hace(entrega) + timedelta(hours=5)
+            )
 
     # -----------------------------------------------------------------
     # Borrar
@@ -362,5 +374,10 @@ class Command(BaseCommand):
             f"Solicitudes -> {por_estado(Solicitud.objects.filter(beneficiario__in=demo))}",
             f"Novedades pendientes: {Novedad.objects.filter(donante__in=demo, estado='Pendiente').count()}  "
             f"Sanciones: {Sancion.objects.filter(usuario__in=demo).count()}",
+            "Entregas (confirmación) -> " + ", ".join(
+                f"{f['estado_confirmacion']}: {f['total']}"
+                for f in Entrega.objects.filter(solicitud__beneficiario__in=demo)
+                .values("estado_confirmacion").annotate(total=Count("id")).order_by("estado_confirmacion")
+            ),
         ]
         self.stdout.write("\n".join(lineas))

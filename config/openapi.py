@@ -129,6 +129,13 @@ EJEMPLOS = {
         "toda": ("Sobre toda la donación", {"donacion": 4, "descripcion": "Ya no puedo entregar esta donación."}),
     },
     ("post", "/api/solicitudes/{id}/entregar/"): {"entregar": ("Con observación", {"observacion": "Faltó una panela."})},
+    ("post", "/api/mis-solicitudes/{id}/confirmar-entrega/"): {
+        "recibido": ("Lo recibí", {"recibido": True}),
+        "reclamo": ("No lo recibí", {"recibido": False, "comentario": "Nadie llegó a la dirección acordada."}),
+    },
+    ("post", "/api/admin/solicitudes/{id}/revisar-reclamo/"): {
+        "revisar": ("Responder", {"respuesta_admin": "El donante confirmó que no pudo ir; ya hablamos con él."})
+    },
     ("post", "/api/admin/solicitudes/{id}/entregar/"): {"entregar": ("Con observación", {"observacion": "Entregado completo."})},
     ("post", "/api/admin/solicitudes/{id}/rechazar/"): {
         "rechazar": ("Rechazar", {"motivo_rechazo": "Se prioriza a familias sin entregas recientes."})

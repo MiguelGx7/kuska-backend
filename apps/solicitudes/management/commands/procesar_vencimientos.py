@@ -5,6 +5,7 @@ Aplica, sobre todos los registros:
 1. RN-27 (Aprobada vencida -> No recogida) y RN-28 (Pendiente vencida -> Cancelada).
 2. Levanta los bloqueos temporales vencidos (RN-03, RN-77).
 3. RN-16 en las donaciones Validada o Agotada cuyo estado quedó desactualizado.
+4. RN-26b: las entregas sin confirmar después de 48 horas pasan a Asumida.
 
 Cada registro va en su propia transacción: un error en uno no detiene los
 demás. Se puede ejecutar varias veces sin efectos dobles: cada función
@@ -19,7 +20,7 @@ from apps.donaciones.models import Donacion
 from apps.donaciones.services import procesar_donaciones_desactualizadas
 from apps.sanciones.services import levantar_bloqueos_vencidos
 from apps.solicitudes.models import Solicitud
-from apps.solicitudes.services import procesar_solicitudes_vencidas
+from apps.solicitudes.services import asumir_entregas_vencidas, procesar_solicitudes_vencidas
 
 
 class Command(BaseCommand):
@@ -36,6 +37,9 @@ class Command(BaseCommand):
             Donacion.objects.filter(estado__in=[Donacion.Estado.VALIDADA, Donacion.Estado.AGOTADA])
         )
 
+        # Un solo UPDATE en su transacción: sin efectos por fila, no hace falta ir una por una.
+        asumidas = asumir_entregas_vencidas()
+
         errores = solicitudes["errores"] + bloqueos["errores"] + donaciones["errores"]
         lineas = [
             f"Vencimientos procesados ({inicio:%d/%m/%Y %H:%M}):",
@@ -47,6 +51,7 @@ class Command(BaseCommand):
             f"  Donaciones -> Validada (RN-16): {donaciones['validadas']}",
             f"  Donaciones -> Agotada (RN-16): {donaciones['agotadas']}",
             f"  Donaciones -> Finalizada (RN-16): {donaciones['finalizadas']}",
+            f"  Entregas asumidas como recibidas (RN-26b): {asumidas}",
             f"  Errores: {errores}",
         ]
         self.stdout.write("\n".join(lineas))

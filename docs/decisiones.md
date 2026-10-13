@@ -398,3 +398,37 @@ La guía de clics está en [docs/despliegue_railway.md](despliegue_railway.md). 
   - Registrar con código válido (entra con el `access`), incorrecto (suma intento), vencido, sin intentos, usado, de otro correo, de recuperación; el de registro no sirve para recuperar; los datos se validan antes; el código es obligatorio; `crear_usuario()` sin código; la recuperación sigue funcionando.
   - Las de `RegistroTests` ahora piden el código primero.
   - Corrieron con `--keepdb` las de `usuarios` (99) y las de `cargar_demo` (3). La migración se aplicó en `test_kumora` y en la base de desarrollo `kumora`. En producción se aplica sola al desplegar, porque el arranque corre `migrate`.
+
+## Paso 17 — Confirmación de la entrega por el beneficiario (RN-26b)
+
+- **Para qué.** Antes, la entrega la registraba el donante o el administrador y el beneficiario no tenía voz. Ahora confirma si recibió el pedido, y si no, reclama. Así el administrador se entera de las entregas que no ocurrieron.
+- **Sin tablas nuevas (siguen 14).** La confirmación es parte de la entrega: hay a lo sumo una por entrega y nace con ella. Por eso son 6 campos en `entrega` y no una tabla aparte.
+- **Los datos los cuida la base, no solo el código.** Tres CHECK:
+  - todo estado distinto de Pendiente exige `fecha_confirmacion`;
+  - Reclamada y Revisada exigen `comentario_beneficiario`;
+  - Revisada exige `respuesta_admin`, `revisada_por` y `fecha_revision`.
+
+  Hay una prueba que intenta guardar cada caso inválido y la base lo rechaza.
+- **Las 48 horas son una constante** (`Entrega.HORAS_PARA_CONFIRMAR`), como `DIAS_BLOQUEO_TEMPORAL`: es una regla del sistema, no un valor que el administrador deba cambiar. Se cuentan **horas exactas** desde `fecha_entrega`, no "hasta el final del día". `confirmar_hasta` se calcula y se muestra en la respuesta; el mensaje usa la hora de Bogotá.
+- **La migración** (`solicitudes/0002`) agrega los campos con `Pendiente` por defecto y, antes de crear los CHECK, pasa las entregas que ya existían a **Asumida**, con `fecha_confirmacion = fecha_entrega`: se registraron antes de esta regla y nadie podía confirmarlas. Hay una prueba de esa parte.
+- **Bloqueos (regla 6).** El orden fijo ahora es usuario → sanción → novedad → solicitud → **entrega** → alimentos → configuración → donación. Confirmar y revisar bloquean la solicitud, luego su entrega, y vuelven a revisar el estado y el plazo con las filas bloqueadas.
+- **Pasar a Asumida es un solo UPDATE condicional**, en su propia transacción (`asumir_entregas_vencidas()`):
+  - "Pendiente y entregada hace más de 48 horas" pasa a Asumida.
+  - Es idempotente, no tiene efectos por fila y **no notifica a nadie**, para no meter ruido. Por eso no hace falta ir una por una, como en los vencimientos de solicitudes.
+  - Solo toma filas de `entrega` y no espera ninguna otra, así que no puede cruzarse con el orden de bloqueos. Si coincide con una respuesta del beneficiario en el último instante, gana quien bloquee primero; el otro, al volver a revisar, ve que ya no está Pendiente.
+  - Como `fecha_confirmacion` queda **el fin del plazo** (`fecha_entrega + 48 h`), da igual cuándo corra el comando.
+- **Dónde se asume.** En `procesar_vencimientos`, que tiene una línea nueva en el resumen, y antes de listar `mis-solicitudes/`, `admin/solicitudes/` y `solicitudes-recibidas/` del donante. También justo antes de que el beneficiario responda: así, si el plazo ya venció, el error dice que "se dio por recibida".
+- **Reclamo, a quién se avisa.** `entrega_reclamada` va a cada administrador Activo y al donante, con el código de pedido y el comentario. `reclamo_revisado` va al **beneficiario y también al donante**, con la misma respuesta. Así el donante, que se enteró del reclamo, también conoce el cierre (cambio pedido al aprobar el plan).
+- **Revisar no sanciona.** Es una alerta para revisar. Si el administrador concluye que alguien falló, sanciona aparte en `admin/sanciones/` con la `solicitud_id` (RN-05, RN-07), con la escala y las validaciones de siempre.
+- **Lo que ve cada uno.**
+  - El beneficiario, en `mis-solicitudes/`: su entrega con estado, plazo (`confirmar_hasta`), su comentario y la respuesta. No ve quién registró ni quién revisó.
+  - El administrador: todo, incluidos `registrada_por` y `revisada_por`, y el filtro `confirmacion` para listar los reclamos (`?confirmacion=Reclamada`).
+  - El donante, en `solicitudes-recibidas/`: solo el estado de la confirmación, no el comentario.
+- **RN-40 pasa de 14 a 16 tipos** (`entrega_reclamada`, `reclamo_revisado`). La columna `notificacion.tipo` ya era VARCHAR(40), así que solo cambian los *choices*.
+- **`cargar_demo`.** Laura confirma la entrega del pan, Jorge la reclama (se avisa a los admins y a Ana) y la del arroz de Laura queda Asumida, porque se movió 38 días al pasado. Las tres se hacen con los servicios reales.
+
+### Casos borde
+
+- **Un beneficiario Bloqueado o Inactivo no puede responder**, porque `EsUsuarioActivo` lo impide. Si no responde en 48 horas, su entrega queda **Asumida** como cualquier otra.
+- **El dashboard no cambia.** Las entregas Reclamada o Revisada siguen contando como entregadas, porque la solicitud sigue `Entregada`. El reclamo es una alerta para revisar, no anula la entrega.
+- **Pasadas las 48 horas ya no se puede reclamar**, ni siquiera si la confirmación quedó Asumida. El mensaje dice hasta cuándo era el plazo.

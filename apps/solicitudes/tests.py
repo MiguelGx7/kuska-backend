@@ -1,5 +1,6 @@
 """Pruebas de los Pasos 6 a 8 y 11: carrito, solicitudes, entregas, novedades y vencimientos."""
 
+import importlib
 from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
@@ -7,6 +8,7 @@ from unittest import mock
 
 from django.core.files.storage import default_storage
 from django.core.management import CommandError, call_command
+from django.db import IntegrityError, transaction
 from django.db.models import F
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -1102,6 +1104,12 @@ class CargarDemoTests(TestCase):
         call_command("procesar_vencimientos", stdout=vencimientos, stderr=StringIO())
         self.assertIn("No recogida (RN-27): 0", vencimientos.getvalue())
         self.assertIn("Finalizada (RN-16): 0", vencimientos.getvalue())
+        self.assertIn("asumidas como recibidas (RN-26b): 0", vencimientos.getvalue())
+        # RN-26b: una entrega Confirmada, una Reclamada y una Asumida.
+        self.assertEqual(
+            set(Entrega.objects.filter(solicitud__in=solicitudes).values_list("estado_confirmacion", flat=True)),
+            {"Confirmada", "Reclamada", "Asumida"},
+        )
 
         # Correrlo otra vez no duplica nada.
         conteo = (Usuario.objects.count(), Donacion.objects.count(), Solicitud.objects.count())
@@ -1127,3 +1135,228 @@ class CargarDemoTests(TestCase):
         Usuario.objects.filter(pk=self.admin.pk).update(estado="Inactivo")
         with self.assertRaisesMessage(CommandError, "createsuperuser"):
             call_command("cargar_demo", stdout=StringIO())
+
+
+# =====================================================================
+# Paso 17: confirmación de la entrega por el beneficiario (RN-26b)
+# =====================================================================
+class ConfirmacionEntregaTests(BaseGestionTest):
+    def entregada(self, alimento=None, codigo="KUM-20261012-0001"):
+        """Una solicitud aprobada que el admin entrega por la API (como en la vida real)."""
+        alimento = alimento or self.panela
+        s = self.crear_solicitud(alimento.donacion, [(alimento, "1")], estado="Aprobada",
+                                 limite=timezone.now() + timedelta(days=2), codigo=codigo)
+        self.assertEqual(self.accion(s, "entregar").status_code, 200)
+        return s
+
+    def confirmar(self, solicitud, datos, cliente=None):
+        return (cliente or self.cb).post(
+            f"/api/mis-solicitudes/{solicitud.pk}/confirmar-entrega/", datos, format="json"
+        )
+
+    def revisar(self, solicitud, datos):
+        return self.accion(solicitud, "revisar-reclamo", datos)
+
+    def entrega(self, solicitud):
+        return Entrega.objects.get(solicitud=solicitud)
+
+    def vencer_plazo(self, solicitud, horas=49):
+        Entrega.objects.filter(solicitud=solicitud).update(fecha_entrega=timezone.now() - timedelta(hours=horas))
+
+    # --- Al entregar ---
+    def test_al_entregar_queda_pendiente_e_invita_a_confirmar(self):
+        s = self.entregada()
+        entrega = self.entrega(s)
+        self.assertEqual(entrega.estado_confirmacion, "Pendiente")
+        aviso = self.notificaciones("solicitud_entregada", self.beneficiario).get()
+        self.assertIn("¿Recibiste tu pedido? Confírmalo en la app antes de", aviso.mensaje)
+        datos = self.cb.get(f"/api/mis-solicitudes/{s.pk}/").data["entrega"]
+        self.assertEqual(datos["estado_confirmacion"], "Pendiente")
+        self.assertEqual(
+            datos["confirmar_hasta"],
+            timezone.localtime(entrega.fecha_entrega + timedelta(hours=48)).isoformat(),
+        )
+
+    # --- El beneficiario responde ---
+    def test_confirmar_que_lo_recibio(self):
+        s = self.entregada()
+        r = self.confirmar(s, {"recibido": True})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["entrega"]["estado_confirmacion"], "Confirmada")
+        self.assertEqual(r.data["estado"], "Entregada")  # la solicitud no cambia
+        self.assertIsNotNone(self.entrega(s).fecha_confirmacion)
+        self.assertFalse(Notificacion.objects.filter(tipo="entrega_reclamada").exists())
+
+    def test_reclamar_con_comentario_avisa_a_los_admins_y_al_donante(self):
+        s = self.entregada()
+        r = self.confirmar(s, {"recibido": False, "comentario": "Nadie llegó a la dirección."})
+        self.assertEqual(r.status_code, 200, r.data)
+        entrega = self.entrega(s)
+        self.assertEqual((entrega.estado_confirmacion, entrega.comentario_beneficiario),
+                         ("Reclamada", "Nadie llegó a la dirección."))
+        s.refresh_from_db()
+        self.assertEqual(s.estado, "Entregada")
+        for destinatario in (self.admin, self.donante):
+            aviso = self.notificaciones("entrega_reclamada", destinatario).get()
+            self.assertIn(s.codigo_pedido, aviso.mensaje)
+            self.assertIn("Nadie llegó a la dirección.", aviso.mensaje)
+            self.assertEqual(aviso.solicitud, s)
+
+    def test_reclamar_sin_comentario(self):
+        s = self.entregada()
+        for datos in ({"recibido": False}, {"recibido": False, "comentario": "   "}):
+            r = self.confirmar(s, datos)
+            self.assertEqual(r.status_code, 400)
+            self.assertIn("el comentario es obligatorio", str(r.data["comentario"]))
+        self.assertEqual(self.entrega(s).estado_confirmacion, "Pendiente")
+
+    def test_recibido_es_obligatorio(self):
+        r = self.confirmar(self.entregada(), {})
+        self.assertEqual(r.data["recibido"], ["Indica si recibiste el pedido (recibido: true o false)."])
+
+    def test_solicitud_ajena_responde_404(self):
+        s = self.entregada()
+        otro = crear_usuario("otro_b@k.com", Rol.BENEFICIARIO, "30")
+        self.assertEqual(self.confirmar(s, {"recibido": True}, cliente=cliente_de(otro)).status_code, 404)
+        self.assertEqual(self.entrega(s).estado_confirmacion, "Pendiente")
+
+    def test_solo_sobre_solicitudes_entregadas(self):
+        s = self.crear_solicitud(self.d2, [(self.panela, "1")], estado="Aprobada",
+                                 limite=timezone.now() + timedelta(days=2))
+        r = self.confirmar(s, {"recibido": True})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Solo puedes confirmar la entrega de una solicitud Entregada; esta está Aprobada.", str(r.data))
+
+    def test_fuera_de_plazo_no_se_puede_responder_ni_reclamar(self):
+        s = self.entregada()
+        self.vencer_plazo(s)
+        r = self.confirmar(s, {"recibido": False, "comentario": "No me llegó"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("El plazo para responder venció", str(r.data))
+        self.assertEqual(self.entrega(s).estado_confirmacion, "Asumida")
+
+    def test_solo_se_responde_una_vez(self):
+        s = self.entregada()
+        self.confirmar(s, {"recibido": True})
+        r = self.confirmar(s, {"recibido": False, "comentario": "Me arrepentí"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Ya respondiste sobre esta entrega (estado: Confirmada).", str(r.data))
+
+    def test_bloqueado_no_puede_responder_y_su_entrega_se_asume(self):
+        s = self.entregada()
+        Usuario.objects.filter(pk=self.beneficiario.pk).update(
+            estado="Bloqueado", bloqueado_hasta=timezone.now() + timedelta(days=7)
+        )
+        self.assertEqual(self.confirmar(s, {"recibido": True}).status_code, 403)
+        self.vencer_plazo(s)
+        servicios.asumir_entregas_vencidas()
+        self.assertEqual(self.entrega(s).estado_confirmacion, "Asumida")
+
+    # --- Asumida (RN-50) ---
+    def test_procesar_vencimientos_la_asume_sin_avisar_y_sin_efectos_dobles(self):
+        vencida = self.entregada()
+        a_tiempo = self.entregada(self.frijol, codigo="KUM-20261012-0002")
+        self.vencer_plazo(vencida)
+        avisos = Notificacion.objects.count()
+        salida = StringIO()
+        call_command("procesar_vencimientos", stdout=salida, stderr=StringIO())
+        self.assertIn("Entregas asumidas como recibidas (RN-26b): 1", salida.getvalue())
+        entrega = self.entrega(vencida)
+        self.assertEqual(entrega.estado_confirmacion, "Asumida")
+        self.assertEqual(entrega.fecha_confirmacion, entrega.fecha_entrega + timedelta(hours=48))
+        self.assertEqual(self.entrega(a_tiempo).estado_confirmacion, "Pendiente")
+        self.assertEqual(Notificacion.objects.count(), avisos)  # asumir no notifica
+        salida = StringIO()
+        call_command("procesar_vencimientos", stdout=salida, stderr=StringIO())
+        self.assertIn("Entregas asumidas como recibidas (RN-26b): 0", salida.getvalue())
+
+    def test_se_asume_antes_de_listar(self):
+        mia = self.entregada()
+        self.vencer_plazo(mia)
+        r = self.cb.get("/api/mis-solicitudes/")
+        self.assertEqual(r.data["results"][0]["entrega"]["estado_confirmacion"], "Asumida")
+
+        otra = self.entregada(self.frijol, codigo="KUM-20261012-0002")
+        self.vencer_plazo(otra)
+        r = self.cliente_admin.get("/api/admin/solicitudes/", {"confirmacion": "Asumida"})
+        self.assertEqual({x["id"] for x in r.data["results"]}, {mia.pk, otra.pk})
+
+    def test_solicitudes_recibidas_del_donante_muestran_solo_el_estado(self):
+        s = self.entregada()
+        self.confirmar(s, {"recibido": False, "comentario": "Llegó dañado"})
+        r = self.cliente.get(f"/api/donaciones/{self.d2.pk}/solicitudes-recibidas/")
+        item = r.data[0]["solicitudes"][0]
+        self.assertEqual(item["estado_confirmacion"], "Reclamada")
+        self.assertNotIn("Llegó dañado", str(r.data))  # el comentario no se muestra al donante aquí
+
+        otra = self.entregada(self.frijol, codigo="KUM-20261012-0002")
+        self.vencer_plazo(otra)
+        r = self.cliente.get(f"/api/donaciones/{self.d3.pk}/solicitudes-recibidas/")
+        self.assertEqual(r.data[0]["solicitudes"][0]["estado_confirmacion"], "Asumida")
+
+    # --- El administrador revisa el reclamo ---
+    def test_revisar_reclamo_avisa_a_ambos_y_no_sanciona(self):
+        s = self.entregada()
+        self.confirmar(s, {"recibido": False, "comentario": "Nadie llegó."})
+        r = self.revisar(s, {"respuesta_admin": "Hablamos con el donante; se reprogramará."})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["estado"], "Entregada")
+        entrega = r.data["entrega"]
+        self.assertEqual((entrega["estado_confirmacion"], entrega["revisada_por"]), ("Revisada", "admin@k.com"))
+        self.assertEqual(entrega["comentario_beneficiario"], "Nadie llegó.")
+        for destinatario in (self.beneficiario, self.donante):
+            aviso = self.notificaciones("reclamo_revisado", destinatario).get()
+            self.assertIn("Hablamos con el donante; se reprogramará.", aviso.mensaje)
+        self.assertFalse(Sancion.objects.exists())
+
+    def test_revisar_sin_respuesta(self):
+        s = self.entregada()
+        self.confirmar(s, {"recibido": False, "comentario": "Nadie llegó."})
+        for datos in ({}, {"respuesta_admin": "  "}):
+            r = self.revisar(s, datos)
+            self.assertEqual(r.status_code, 400)
+            self.assertEqual(r.data["respuesta_admin"], ["Debes escribir la respuesta al reclamo."])
+        self.assertEqual(self.entrega(s).estado_confirmacion, "Reclamada")
+
+    def test_solo_se_revisan_las_reclamadas(self):
+        s = self.entregada()
+        self.confirmar(s, {"recibido": True})
+        r = self.revisar(s, {"respuesta_admin": "x"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Solo se revisan entregas reclamadas; esta está Confirmada.", str(r.data))
+        sin_entrega = self.crear_solicitud(self.d1, [(self.arroz, "1")], codigo="KUM-20261012-0003")
+        self.assertIn("sin entrega", str(self.revisar(sin_entrega, {"respuesta_admin": "x"}).data))
+        self.assertEqual(self.cb.post(f"/api/admin/solicitudes/{s.pk}/revisar-reclamo/", {}).status_code, 403)
+
+    def test_filtro_confirmacion_lista_los_reclamos(self):
+        reclamada = self.entregada()
+        confirmada = self.entregada(self.frijol, codigo="KUM-20261012-0002")
+        self.confirmar(reclamada, {"recibido": False, "comentario": "No llegó"})
+        self.confirmar(confirmada, {"recibido": True})
+        ids = lambda c: [x["id"] for x in self.cliente_admin.get("/api/admin/solicitudes/", {"confirmacion": c}).data["results"]]
+        self.assertEqual(ids("Reclamada"), [reclamada.pk])
+        self.assertEqual(ids("Confirmada"), [confirmada.pk])
+        self.assertEqual(self.cliente_admin.get("/api/admin/solicitudes/", {"confirmacion": "Otra"}).status_code, 400)
+
+    # --- Base de datos ---
+    def test_los_check_impiden_datos_incoherentes(self):
+        entrega = self.entrega(self.entregada())
+        casos = [
+            {"estado_confirmacion": "Confirmada"},  # sin fecha_confirmacion
+            {"estado_confirmacion": "Reclamada", "fecha_confirmacion": timezone.now()},  # sin comentario
+            {"estado_confirmacion": "Revisada", "fecha_confirmacion": timezone.now(),
+             "comentario_beneficiario": "x"},  # sin respuesta, admin ni fecha de revisión
+        ]
+        for cambios in casos:
+            with self.subTest(cambios=cambios["estado_confirmacion"]):
+                with self.assertRaises(IntegrityError), transaction.atomic():
+                    Entrega.objects.filter(pk=entrega.pk).update(**cambios)
+
+    def test_migracion_asume_las_entregas_existentes(self):
+        from django.apps import apps as registro_apps
+
+        migracion = importlib.import_module("apps.solicitudes.migrations.0002_entrega_confirmacion")
+        entrega = self.entrega(self.entregada())
+        migracion.asumir_entregas_existentes(registro_apps, None)
+        entrega.refresh_from_db()
+        self.assertEqual((entrega.estado_confirmacion, entrega.fecha_confirmacion), ("Asumida", entrega.fecha_entrega))

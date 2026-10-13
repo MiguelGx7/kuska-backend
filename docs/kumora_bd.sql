@@ -208,15 +208,37 @@ CREATE TABLE detalle_solicitud (
 -- ---------------------------------------------------------------------
 -- 9. ENTREGA (la registra el donante o el administrador)
 -- Es total: no hay entregas parciales (diferencias en observacion).
+-- Confirmacion del beneficiario (RN-26b): 48 horas desde fecha_entrega
+-- para responder Recibido (Confirmada) o No recibido (Reclamada, con
+-- comentario). Sin respuesta pasa a Asumida. El admin revisa los
+-- reclamos (Revisada, con respuesta). La solicitud sigue Entregada.
 -- ---------------------------------------------------------------------
 CREATE TABLE entrega (
-  id              BIGINT AUTO_INCREMENT PRIMARY KEY,
-  solicitud_id    BIGINT NOT NULL UNIQUE,
-  registrada_por  BIGINT NOT NULL,
-  fecha_entrega   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  observacion     VARCHAR(255) NULL,
+  id                       BIGINT AUTO_INCREMENT PRIMARY KEY,
+  solicitud_id             BIGINT NOT NULL UNIQUE,
+  registrada_por           BIGINT NOT NULL,
+  fecha_entrega            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  observacion              VARCHAR(255) NULL,
+  estado_confirmacion      ENUM('Pendiente','Confirmada','Asumida','Reclamada','Revisada') NOT NULL DEFAULT 'Pendiente',
+  fecha_confirmacion       DATETIME NULL,  -- cuando respondio o se asumio
+  comentario_beneficiario  VARCHAR(255) NULL,
+  respuesta_admin          VARCHAR(255) NULL,
+  revisada_por             BIGINT NULL,
+  fecha_revision           DATETIME NULL,
   CONSTRAINT fk_entrega_solicitud FOREIGN KEY (solicitud_id)   REFERENCES solicitud(id),
-  CONSTRAINT fk_entrega_usuario   FOREIGN KEY (registrada_por) REFERENCES usuario(id)
+  CONSTRAINT fk_entrega_usuario   FOREIGN KEY (registrada_por) REFERENCES usuario(id),
+  CONSTRAINT fk_entrega_revisor   FOREIGN KEY (revisada_por)   REFERENCES usuario(id),
+  CONSTRAINT chk_entrega_fecha_confirmacion CHECK (
+    estado_confirmacion = 'Pendiente' OR fecha_confirmacion IS NOT NULL
+  ),
+  CONSTRAINT chk_entrega_reclamo CHECK (
+    estado_confirmacion NOT IN ('Reclamada','Revisada') OR comentario_beneficiario IS NOT NULL
+  ),
+  CONSTRAINT chk_entrega_revision CHECK (
+    estado_confirmacion <> 'Revisada'
+    OR (respuesta_admin IS NOT NULL AND revisada_por IS NOT NULL AND fecha_revision IS NOT NULL)
+  ),
+  INDEX idx_entrega_confirmacion (estado_confirmacion, fecha_entrega)
 );
 
 -- ---------------------------------------------------------------------
@@ -273,7 +295,8 @@ CREATE TABLE sancion (
 
 -- ---------------------------------------------------------------------
 -- 12. NOTIFICACION
--- tipo: valores fijos de RN-40 (TextChoices en Django).
+-- tipo: valores fijos de RN-40 (TextChoices en Django), 16 tipos:
+-- los 14 originales mas entrega_reclamada y reclamo_revisado (RN-26b).
 -- ---------------------------------------------------------------------
 CREATE TABLE notificacion (
   id            BIGINT AUTO_INCREMENT PRIMARY KEY,

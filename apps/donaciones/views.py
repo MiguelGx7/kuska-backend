@@ -8,7 +8,7 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
 from apps.solicitudes import services as servicios_solicitudes
-from apps.solicitudes.models import Solicitud
+from apps.solicitudes.models import Entrega, Solicitud
 from apps.solicitudes.serializers import AlimentoConSolicitudesSerializer
 from apps.usuarios.permissions import PERMISOS_ADMIN, PERMISOS_BENEFICIARIO, PERMISOS_DONANTE
 
@@ -179,6 +179,7 @@ class DonacionDonanteViewSet(
     def solicitudes_recibidas(self, request, pk=None):
         donacion = self.get_object()
         _poner_al_dia(Solicitud.objects.filter(donacion=donacion), Donacion.objects.filter(pk=donacion.pk))
+        servicios_solicitudes.asumir_entregas_vencidas(Entrega.objects.filter(solicitud__donacion=donacion))
         datos = servicios_solicitudes.solicitudes_recibidas(donacion)
         return Response(AlimentoConSolicitudesSerializer(datos, many=True).data)
 
