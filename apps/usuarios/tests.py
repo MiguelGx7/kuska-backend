@@ -22,11 +22,12 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.sanciones.models import Sancion
 from config.certificado import ruta_certificado
-from config.correo import elegir_backend
+from config.correo import BREVO, CONSOLA, SMTP, elegir_backend, limpiar_clave, resumen_configuracion
 
+from .apps import registrar_configuracion_correo
 from .models import RecuperacionContrasena, Rol, Usuario
 from .permissions import EsAdministrador, EsBeneficiario, EsDonante
-from .services import MENSAJE_CODIGO_INVALIDO, MENSAJE_RECUPERACION
+from .services import MENSAJE_CODIGO_INVALIDO, MENSAJE_RECUPERACION, _enmascarar_correo
 
 CLAVE = "Kumora.2026x"
 CLAVE_NUEVA = "Otra.Clave2026"
@@ -750,7 +751,7 @@ class CorreoRecuperacionTests(BaseAPITest):
                     r = self.post(self.url, {"correo": "dona@mail.com"})
                 # RN-04b: misma respuesta; el fallo solo queda en el log.
                 self.assertEqual((r.status_code, r.data), (200, {"mensaje": MENSAJE_RECUPERACION}))
-                self.assertIn("No se pudo enviar el código de recuperación a dona@mail.com", log.output[0])
+                self.assertIn(f"No se pudo enviar el código de recuperación al usuario {self.usuario.pk}.", log.output[0])
         # El código sí se generó (el usuario puede pedir otro cuando el correo funcione).
         self.assertEqual(RecuperacionContrasena.objects.filter(usuario=self.usuario).count(), 2)
 
@@ -761,3 +762,84 @@ class ElegirBackendCorreoTests(SimpleTestCase):
         self.assertEqual(elegir_backend("", "yo@gmail.com"), "django.core.mail.backends.smtp.EmailBackend")
         self.assertEqual(elegir_backend("  ", ""), "django.core.mail.backends.console.EmailBackend")
         self.assertEqual(elegir_backend(None, None), "django.core.mail.backends.console.EmailBackend")
+
+
+# =====================================================================
+# Diagnóstico del correo en producción: logs sin datos sensibles
+# =====================================================================
+@override_settings(DEFAULT_FROM_EMAIL=REMITENTE)
+class LogsRecuperacionTests(BaseAPITest):
+    url = "/api/auth/recuperar/solicitar/"
+
+    def setUp(self):
+        super().setUp()
+        self.usuario = crear_usuario("dona@mail.com", Rol.DONANTE, "10", tipo_donante="Persona")
+
+    def test_info_al_enviar_solo_con_el_id_y_sin_el_codigo(self):
+        with self.assertLogs("apps.usuarios.services", level="INFO") as log:
+            self.post(self.url, {"correo": "dona@mail.com"})
+        codigo = re.search(r"\b(\d{6})\b", mail.outbox[-1].body).group(1)
+        texto = "\n".join(log.output)
+        self.assertIn(f"INFO:apps.usuarios.services:Código de recuperación enviado al usuario {self.usuario.pk} (", texto)
+        self.assertNotIn(codigo, texto)
+        self.assertNotIn("dona@mail.com", texto)
+
+    def test_warning_si_el_correo_no_es_de_ningun_usuario_sin_mostrarlo(self):
+        with self.assertLogs("apps.usuarios.services", level="WARNING") as log:
+            r = self.post(self.url, {"correo": "Nadie.Aqui@correo.com"})
+        self.assertEqual(r.data, {"mensaje": MENSAJE_RECUPERACION})  # RN-04b: misma respuesta
+        self.assertEqual(mail.outbox, [])
+        self.assertEqual(
+            log.output,
+            ["WARNING:apps.usuarios.services:Recuperación pedida para un correo que no es de ningún usuario: "
+             "Na***@correo.com"],
+        )
+
+    @override_settings(**BREVO_FALSO)
+    def test_el_error_de_envio_muestra_el_id_y_no_el_correo(self):
+        with mock.patch("requests.Session.request", side_effect=requests.ConnectionError("sin red")), \
+                self.assertLogs("apps.usuarios.services", level="ERROR") as log:
+            self.post(self.url, {"correo": "dona@mail.com"})
+        self.assertIn(f"No se pudo enviar el código de recuperación al usuario {self.usuario.pk}.", log.output[0])
+        self.assertNotIn("dona@mail.com", log.output[0])
+
+    def test_enmascarar_correo(self):
+        self.assertEqual(_enmascarar_correo("dona@mail.com"), "do***@mail.com")
+        self.assertEqual(_enmascarar_correo("a@x.co"), "a***@x.co")
+        self.assertEqual(_enmascarar_correo("sin-arroba"), "***")
+
+
+class ConfiguracionCorreoTests(SimpleTestCase):
+    CLAVE = "xkeysib-0123456789secreta"
+
+    def test_limpia_espacios_y_comillas_de_la_clave(self):
+        self.assertEqual(limpiar_clave(f'  "{self.CLAVE}" '), self.CLAVE)
+        self.assertEqual(limpiar_clave(f"'{self.CLAVE}'"), self.CLAVE)
+        self.assertEqual(limpiar_clave(None), "")
+        # Unas comillas vacías no cuentan como clave: no se elige Brevo.
+        self.assertEqual(elegir_backend('""', ""), CONSOLA)
+
+    def test_resumen_con_brevo_bien_configurado_no_muestra_la_clave(self):
+        mensajes = resumen_configuracion(BREVO, self.CLAVE, REMITENTE, debug=False)
+        self.assertEqual(mensajes, [("INFO", f"Correo: se usa Brevo (API HTTPS). Remitente: {REMITENTE}.")])
+
+    def test_avisa_si_la_clave_es_smtp_sin_mostrarla(self):
+        mensajes = resumen_configuracion(BREVO, "xsmtpsib-abcdef123456", REMITENTE, debug=False)
+        self.assertEqual(mensajes[1][0], "WARNING")
+        self.assertIn("empieza por 'xsmtpsib-'", mensajes[1][1])
+        self.assertNotIn("abcdef123456", str(mensajes))
+
+    def test_avisa_si_falta_el_remitente_o_si_produccion_queda_en_consola(self):
+        self.assertIn("DEFAULT_FROM_EMAIL", resumen_configuracion(BREVO, self.CLAVE, "", debug=False)[1][1])
+        self.assertIn("no se envían", resumen_configuracion(CONSOLA, "", "", debug=False)[1][1])
+        self.assertEqual(len(resumen_configuracion(CONSOLA, "", "", debug=True)), 1)  # en desarrollo es normal
+        self.assertIn("Correo: se usa SMTP.", resumen_configuracion(SMTP, "", REMITENTE, debug=False)[0][1])
+
+    @override_settings(EMAIL_BACKEND=BREVO, BREVO_API_KEY=CLAVE, DEFAULT_FROM_EMAIL=REMITENTE, DEBUG=False)
+    def test_al_arrancar_queda_en_el_log_que_backend_se_eligio(self):
+        with self.assertLogs("apps.usuarios.apps", level="INFO") as log:
+            registrar_configuracion_correo()
+        self.assertEqual(
+            log.output, [f"INFO:apps.usuarios.apps:Correo: se usa Brevo (API HTTPS). Remitente: {REMITENTE}."]
+        )
+        self.assertNotIn(self.CLAVE, "\n".join(log.output))

@@ -360,4 +360,12 @@ La guía de clics está en [docs/despliegue_railway.md](despliegue_railway.md). 
   - La elección del backend se prueba aparte. Son 4 pruebas nuevas en `usuarios`, y la app completa pasa (71).
 - **No se agregó `anymail` a `INSTALLED_APPS`.** Solo hace falta para recibir *webhooks* de seguimiento, que Kumora no usa; para enviar basta el backend.
 - **Ajuste de paso: WhiteNoise solo en producción.** Desde el Paso 14, su middleware estaba siempre activo y en desarrollo y en las pruebas avisaba `No directory at: ...staticfiles`, porque en local no se corre `collectstatic`. Ahora se agrega solo con `DEBUG=False`, como el resto de lo de producción; en local los estáticos los sirve `runserver`. `check --deploy` en producción simulada sigue sin advertencias.
+- **Logs para diagnosticar** (agregados cuando en producción el correo no llegaba y Brevo no mostraba registros). Nunca muestran la clave, el código ni el correo completo:
+  - **Al arrancar** (`UsuariosConfig.ready()`, porque en `settings.py` el logging aún no está configurado): INFO con el backend elegido y el remitente.
+  - **Avisos de configuración:** WARNING si la clave no empieza por `xkeysib-` (por ejemplo, una SMTP key `xsmtpsib-`), si falta el remitente o si producción quedó en consola.
+  - **Al enviar un código:** INFO con el id del usuario.
+  - **Correo que no es de ningún usuario:** WARNING con el correo enmascarado (`do***@mail.com`).
+  - **Error de envío:** ahora muestra el id del usuario en lugar de su correo.
+  - **La clave se limpia** de espacios y comillas alrededor, que se cuelan al pegarla en Railway.
+- **LOGGING de producción revisado.** Un solo handler de consola en el logger raíz, con formato `NIVEL logger: mensaje`. Las apps de Kumora (`apps.*`) se ven desde INFO; anymail y Django, desde WARNING. Al logger `django` se le quitan sus handlers propios, para que los errores no salgan dos veces ni se intente `mail_admins`. Se comprobó con producción simulada qué sale y qué no.
 - **Pendiente para un uso real:** un dominio propio autenticado en Brevo. Con un remitente `@gmail.com` los correos pueden llegar a spam.

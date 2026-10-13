@@ -21,6 +21,7 @@ from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, Ou
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.sanciones.models import Sancion
+from config.correo import nombre_backend
 
 from .models import RecuperacionContrasena, Rol, Usuario
 
@@ -267,13 +268,33 @@ def _enviar_codigo(usuario, codigo):
         )
     except Exception:
         # No se le cuenta al cliente: la respuesta debe ser siempre la misma.
-        logger.exception("No se pudo enviar el código de recuperación a %s", usuario.correo)
+        # En el log va el id del usuario, no su correo ni el código.
+        logger.exception("No se pudo enviar el código de recuperación al usuario %s.", usuario.pk)
+        return
+    logger.info(
+        "Código de recuperación enviado al usuario %s (%s).",
+        usuario.pk,
+        nombre_backend(settings.EMAIL_BACKEND),
+    )
+
+
+def _enmascarar_correo(correo):
+    """'dona@mail.com' -> 'do***@mail.com': sirve para revisar sin exponer el correo."""
+    local, arroba, dominio = (correo or "").strip().partition("@")
+    if not arroba:
+        return "***"
+    return f"{local[:2]}***@{dominio}"
 
 
 def solicitar_recuperacion(correo):
     """Genera y envía un código si el correo existe. No revela si existe."""
     usuario = Usuario.objects.filter(correo__iexact=normalizar_correo(correo)).first()
     if usuario is None:
+        # Al cliente se le responde igual (RN-04b); en el log, el correo enmascarado.
+        logger.warning(
+            "Recuperación pedida para un correo que no es de ningún usuario: %s",
+            _enmascarar_correo(correo),
+        )
         return
 
     codigo = f"{secrets.randbelow(10**6):06d}"

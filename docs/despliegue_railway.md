@@ -121,6 +121,16 @@ Railway bloquea el SMTP saliente (puertos 25, 465, 587 y 2525) en los planes Tri
    - Debe llegar "Kumora: código para recuperar tu contraseña", con el código de 6 dígitos y "Vence en 15 minutos".
    - En Brevo, **Transactional → Logs** muestra el envío.
 
+**Qué buscar en los logs** del servicio (**Deployments → View logs**):
+
+- Al arrancar: `INFO apps.usuarios.apps: Correo: se usa Brevo (API HTTPS). Remitente: ...`. Si dice `consola` o `SMTP`, `BREVO_API_KEY` no llegó al servicio: revisa que la variable esté en **este** servicio, no solo en las compartidas sin agregar.
+- `WARNING ... BREVO_API_KEY no parece una API key v3`: pegaste la SMTP key (`xsmtpsib-`) en lugar de la API key (`xkeysib-`).
+- Al pedir un código:
+  - `INFO ... Código de recuperación enviado al usuario <id> (Brevo (API HTTPS))`: Brevo aceptó el envío.
+  - `WARNING ... correo que no es de ningún usuario: xx***@dominio`: ese correo no existe en `kumora_prod`. Los usuarios de desarrollo no están en producción.
+  - `ERROR ... No se pudo enviar el código ... al usuario <id>`, seguido del detalle de anymail: Brevo rechazó la petición.
+- **Brevo solo registra los correos que acepta.** Una petición rechazada (clave inválida, IP no autorizada, remitente sin verificar) no aparece en **Transactional → Logs**; el motivo está en el log de Railway.
+
 Si el envío falla, la API responde igual que siempre ("Si el correo está registrado…", RN-04b) y el error queda en los logs del servicio: `No se pudo enviar el código de recuperación a ...`.
 
 > Un remitente `@gmail.com` enviado por Brevo puede llegar a la carpeta de spam, porque el dominio gmail.com no autoriza a Brevo. Para la sustentación basta; para un uso real conviene un dominio propio autenticado en Brevo (registros DNS).

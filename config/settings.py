@@ -12,7 +12,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from config.certificado import ruta_certificado
-from config.correo import elegir_backend
+from config.correo import elegir_backend, limpiar_clave
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -191,7 +191,8 @@ CLOUDINARY_STORAGE = {"CLOUDINARY_URL": os.environ["CLOUDINARY_URL"]}
 #    Railway bloquea el SMTP saliente, pero no las peticiones HTTPS.
 # 2. EMAIL_HOST_USER → SMTP (por ejemplo Gmail con contraseña de aplicación).
 # 3. Ninguno → consola: el correo se muestra en la terminal (o en los logs).
-BREVO_API_KEY = os.getenv("BREVO_API_KEY", "").strip()
+# Sin espacios ni comillas alrededor (se cuelan al pegarla en Railway).
+BREVO_API_KEY = limpiar_clave(os.getenv("BREVO_API_KEY"))
 EMAIL_HOST = os.getenv("EMAIL_HOST", "")
 EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
 EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
@@ -300,10 +301,21 @@ if not DEBUG:
     # casi irreversible. Por eso se silencian esas dos advertencias a propósito.
     SILENCED_SYSTEM_CHECKS = ["security.W005", "security.W021"]
 
-    # Errores a la consola (stdout), que es lo que muestran los logs de Railway.
+    # Logs a la consola, que es lo que muestra Railway. Todo pasa por el logger raíz
+    # (un solo handler, sin duplicados):
+    # - apps de Kumora ("apps.*"): desde INFO (backend de correo elegido, códigos enviados...);
+    # - anymail (Brevo) y Django: desde WARNING (incluye los 500 de django.request);
+    # - el resto: desde WARNING.
     LOGGING = {
         "version": 1,
         "disable_existing_loggers": False,
-        "handlers": {"consola": {"class": "logging.StreamHandler"}},
+        "formatters": {"simple": {"format": "%(levelname)s %(name)s: %(message)s"}},
+        "handlers": {"consola": {"class": "logging.StreamHandler", "formatter": "simple"}},
         "root": {"handlers": ["consola"], "level": "WARNING"},
+        "loggers": {
+            "apps": {"level": "INFO"},
+            "anymail": {"level": "WARNING"},
+            # Sin handlers propios: así no se repite por la consola de Django ni intenta mail_admins.
+            "django": {"handlers": [], "level": "WARNING"},
+        },
     }
