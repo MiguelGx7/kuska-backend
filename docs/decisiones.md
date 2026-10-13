@@ -291,6 +291,11 @@ La guía de clics está en [docs/despliegue_railway.md](despliegue_railway.md). 
   - Cada worker de gunicorn carga los settings, así que solo se escribe si el contenido cambió.
   - Acepta saltos de línea reales o escritos como `\n`, y falla con un mensaje claro si el texto no es un PEM.
   - En local nada cambia: sin esa variable se usa `DB_SSL_CA` como antes.
+  - **Agregado: `DB_SSL_CA_BASE64`.** El editor de variables de Railway borra o daña los textos de varias líneas, así que pegar el PEM directo no sirvió. El base64 es el mismo certificado en una sola línea.
+    - La app lo decodifica y lo escribe en el mismo archivo temporal. Antes de decodificar quita los espacios y saltos de línea, por si se pegó partido.
+    - Si el valor no es base64 válido, o al decodificarlo no queda un PEM, falla con un mensaje que dice qué variable revisar.
+    - Prioridad: `DB_SSL_CA_BASE64` → `DB_SSL_CA_CONTENIDO` → `DB_SSL_CA`. Así se puede pasar de una variable a otra sin borrar la anterior.
+    - Se comprobó que el comando de PowerShell de la guía genera el mismo base64 que `base64 -w0`, y que la conexión real a Aiven funciona usando solo esa variable.
   - La lógica está en `config/certificado.py` para poder probarla sola, con 4 pruebas.
   - Se comprobó una conexión real a Aiven usando solo el contenido.
 - **Producción solo con `DEBUG=False`.** Un bloque `if not DEBUG:` al final de `settings.py` activa:

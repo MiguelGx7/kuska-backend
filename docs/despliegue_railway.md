@@ -13,7 +13,7 @@ Guía paso a paso para publicar el backend de Kumora en [Railway](https://railwa
 | `requirements.txt` | Incluye `gunicorn` (servidor de producción) y `whitenoise` (sirve los estáticos del admin y de Swagger). |
 | `.python-version` | Fija **Python 3.14**, la misma versión del desarrollo. Railpack (el constructor de Railway) la lee de este archivo. |
 | `railpack.json` | Paquetes del sistema para compilar `mysqlclient` (`pkg-config`, `build-essential`, `default-libmysqlclient-dev`) y la librería que necesita al correr (`libmariadb3`). También el **comando de inicio**: `migrate` → `collectstatic` → `gunicorn` en el puerto `$PORT`. |
-| `config/settings.py` | Con `DEBUG=False` activa HTTPS detrás del proxy de Railway, cookies seguras, HSTS y logs en la consola. Lee el certificado de Aiven desde `DB_SSL_CA_CONTENIDO`. |
+| `config/settings.py` y `config/certificado.py` | Con `DEBUG=False` activa HTTPS detrás del proxy de Railway, cookies seguras, HSTS y logs en la consola. Lee el certificado de Aiven desde `DB_SSL_CA_BASE64` (o `DB_SSL_CA_CONTENIDO`) y lo escribe en un archivo temporal. |
 | `config/urls.py` | Swagger (`/api/docs/`) se muestra en producción solo si `SWAGGER_PUBLICO=True`. |
 
 > **Antes de empezar:** sube todos los cambios a la rama `master` de GitHub. Railway despliega desde el repositorio, no desde tu PC. El `.env` y el `ca.pem` **no** se suben (están en `.gitignore`); sus valores se cargan como variables en Railway.
@@ -56,12 +56,28 @@ Las variables se comparten entre el servicio web y el cron, así que conviene cr
 | `SECURE_HSTS_SECONDS` | `3600` al principio; `31536000` (1 año) cuando el dominio sea definitivo. |
 | `DB_NAME` | `kumora_prod` (o la base que uses). |
 | `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT` | Los de tu servicio en Aiven (**Overview → Connection information**). |
-| `DB_SSL_CA_CONTENIDO` | El **contenido completo** de tu `ca.pem`: ábrelo con un editor y copia desde `-----BEGIN CERTIFICATE-----` hasta `-----END CERTIFICATE-----`. Railway acepta valores de varias líneas. |
+| `DB_SSL_CA_BASE64` | Tu `ca.pem` codificado en **base64, en una sola línea**. Mira cómo generarlo justo debajo de esta tabla. |
 | `CLOUDINARY_URL` | `cloudinary://<api_key>:<api_secret>@<cloud_name>` |
 | `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `DEFAULT_FROM_EMAIL` | Los del correo (ver la nota de abajo). |
 | `EMAIL_TIMEOUT` | `10` |
 
-No definas `DB_SSL_CA` en Railway: con `DB_SSL_CA_CONTENIDO` no hace falta. `PORT` lo pone Railway solo; no lo agregues.
+No definas `DB_SSL_CA` ni `DB_SSL_CA_CONTENIDO` en Railway: con `DB_SSL_CA_BASE64` basta. `PORT` lo pone Railway solo; no lo agregues.
+
+### Cómo generar `DB_SSL_CA_BASE64`
+
+El editor de variables de Railway borra o daña los textos de varias líneas, y el `ca.pem` tiene muchas. Por eso se pasa en base64: es el mismo certificado convertido en **una sola línea** de letras y números, que la app vuelve a convertir en archivo al arrancar.
+
+En PowerShell, dentro de la carpeta del proyecto (donde está tu `ca.pem`):
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("ca.pem")) | Set-Clipboard
+```
+
+Eso deja el base64 copiado en el portapapeles. Pégalo como valor de `DB_SSL_CA_BASE64` en Railway: es una sola línea larga (unos 2200 caracteres) que empieza por `LS0tLS1CRUdJTi`. Desde Git Bash, `base64 -w0 ca.pem` da exactamente lo mismo.
+
+> No uses `certutil -encode`: agrega encabezados y saltos de línea.
+
+Orden de prioridad del certificado: `DB_SSL_CA_BASE64` → `DB_SSL_CA_CONTENIDO` → `DB_SSL_CA` (ruta, solo en local). Si el base64 está incompleto o no es un certificado, el despliegue falla al arrancar con un mensaje claro en los logs.
 
 > **Correo en el plan Hobby:** Railway bloquea el SMTP saliente (puertos 25, 465, 587 y 2525) en los planes Trial y Hobby. Se habilita en Pro. En esos planes:
 > - el correo con el código de recuperación **no saldrá**. La API no se queda colgada (se corta a los `EMAIL_TIMEOUT` segundos) y sigue respondiendo el mensaje de siempre, pero el usuario no recibe el código.
@@ -125,7 +141,8 @@ Notas:
 |---|---|
 | El build falla instalando `mysqlclient` (`pkg-config`, `mysql_config not found`) | El servicio no usa Railpack, así que no leyó `railpack.json`. Revisa **Settings → Build → Builder**. Plan B: cambiar `mysqlclient` por `PyMySQL` (ver `docs/decisiones.md`, Paso 14). |
 | `KeyError: 'SECRET_KEY'` (o `DB_NAME`, `CLOUDINARY_URL`...) | Falta esa variable en el servicio. |
-| `Falta el certificado de Aiven` o `no parece un certificado PEM` | `DB_SSL_CA_CONTENIDO` está vacía o se copió incompleta. |
+| `Falta el certificado de Aiven` | No está definida `DB_SSL_CA_BASE64` en el servicio (o en las variables compartidas). |
+| `DB_SSL_CA_BASE64 no es un base64 válido` o `no contiene un certificado PEM` | El valor se copió incompleto o no salió del `ca.pem`. Vuelve a generarlo con el comando de PowerShell y pégalo completo. |
 | `Can't connect to MySQL server` | El servicio de Aiven está apagado (plan gratis) o los datos de conexión no coinciden. |
 | `Bad Request (400)` en todo | El dominio no está en `ALLOWED_HOSTS`. |
 | Redirecciones infinitas | Falta el encabezado del proxy. No debería pasar en Railway; revisa que `DEBUG=False` venga de las variables y no de otro lado. |

@@ -62,7 +62,8 @@ El archivo `.env` está en `.gitignore`: **nunca se sube** al repositorio. La pl
 | `CORS_ALLOWED_ORIGINS` | Orígenes del panel web, separados por coma. |
 | `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT` | Conexión a MySQL en Aiven. |
 | `DB_SSL_CA` | Ruta al `ca.pem` de Aiven (relativa a la raíz del proyecto o absoluta). Es la que se usa en local. |
-| `DB_SSL_CA_CONTENIDO` | Solo en Railway: el texto completo del `ca.pem`. Si está definida, tiene prioridad sobre `DB_SSL_CA`. |
+| `DB_SSL_CA_BASE64` | Solo en Railway (recomendado): el `ca.pem` en base64, en una línea. Prioridad: `DB_SSL_CA_BASE64` > `DB_SSL_CA_CONTENIDO` > `DB_SSL_CA`. Ver [docs/despliegue_railway.md](docs/despliegue_railway.md). |
+| `DB_SSL_CA_CONTENIDO` | Alternativa: el texto completo del `ca.pem`. El editor de Railway daña los textos de varias líneas, por eso se recomienda el base64. |
 | `CLOUDINARY_URL` | `cloudinary://<api_key>:<api_secret>@<cloud_name>` |
 | `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `DEFAULT_FROM_EMAIL` | Correo SMTP con TLS. Con Gmail se usa una contraseña de aplicación. Si `EMAIL_HOST_USER` está vacío, los correos salen por consola. `EMAIL_TIMEOUT` (10 s) evita esperas largas. |
 | `CSRF_TRUSTED_ORIGINS`, `SWAGGER_PUBLICO`, `SECURE_HSTS_SECONDS` | Solo producción (`DEBUG=False`): el dominio HTTPS para el admin, si se muestra Swagger y la duración de HSTS. En local se dejan vacías. |

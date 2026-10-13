@@ -111,8 +111,14 @@ WSGI_APPLICATION = "config.wsgi.application"
 # Base de datos: MySQL en Aiven (con SSL)
 # ---------------------------------------------------------------------
 # Local: DB_SSL_CA es la ruta al ca.pem (relativa a BASE_DIR o absoluta).
-# Railway: DB_SSL_CA_CONTENIDO trae el texto del certificado (ver config/certificado.py).
-DB_SSL_CA = ruta_certificado(BASE_DIR, os.getenv("DB_SSL_CA"), os.getenv("DB_SSL_CA_CONTENIDO"))
+# Railway: DB_SSL_CA_BASE64 (recomendado) o DB_SSL_CA_CONTENIDO traen el certificado
+# y se escribe en un archivo temporal. Prioridad y detalles en config/certificado.py.
+DB_SSL_CA = ruta_certificado(
+    BASE_DIR,
+    ruta=os.getenv("DB_SSL_CA"),
+    contenido=os.getenv("DB_SSL_CA_CONTENIDO"),
+    en_base64=os.getenv("DB_SSL_CA_BASE64"),
+)
 
 DATABASES = {
     "default": {

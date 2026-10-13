@@ -4,6 +4,7 @@ Pruebas del Paso 3 (autenticación) y del Paso 4 (administración de usuarios).
 Corren sobre una base temporal (test_<DB_NAME>) que Django crea y borra.
 """
 
+import base64
 import re
 import tempfile
 from datetime import timedelta
@@ -622,20 +623,51 @@ class CertificadoAivenTests(SimpleTestCase):
         parche.start()
         self.addCleanup(parche.stop)
 
+    def b64(self, texto):
+        return base64.b64encode(texto.encode("utf-8")).decode("ascii")
+
+    def leer(self, ruta):
+        self.assertTrue(ruta.startswith(self.carpeta.name))
+        return Path(ruta).read_text(encoding="utf-8")
+
     def test_en_local_usa_la_ruta_relativa_al_proyecto(self):
         self.assertEqual(ruta_certificado("/proyecto", "ca.pem"), str(Path("/proyecto") / "ca.pem"))
 
-    def test_en_railway_escribe_el_contenido_en_un_temporal(self):
-        ruta = ruta_certificado("/proyecto", "ca.pem", self.PEM)  # el contenido manda
-        self.assertTrue(ruta.startswith(self.carpeta.name))
-        self.assertEqual(Path(ruta).read_text(encoding="utf-8"), self.PEM + "\n")
+    def test_contenido_se_escribe_en_un_temporal(self):
+        ruta = ruta_certificado("/proyecto", "ca.pem", contenido=self.PEM)  # el contenido manda sobre la ruta
+        self.assertEqual(self.leer(ruta), self.PEM + "\n")
 
-    def test_acepta_saltos_de_linea_escritos_como_barra_n(self):
-        ruta = ruta_certificado("/proyecto", None, self.PEM.replace("\n", "\n"))
-        self.assertEqual(Path(ruta).read_text(encoding="utf-8"), self.PEM + "\n")
+    def test_contenido_acepta_saltos_de_linea_escritos_como_barra_n(self):
+        escrito = self.PEM.replace("\n", r"\n")  # una sola línea con \n literales (barra + n)
+        self.assertNotIn("\n", escrito)
+        self.assertEqual(self.leer(ruta_certificado("/p", contenido=escrito)), self.PEM + "\n")
 
-    def test_errores_claros(self):
-        with self.assertRaisesMessage(ValueError, "no parece un certificado PEM"):
-            ruta_certificado("/proyecto", None, "texto cualquiera")
-        with self.assertRaisesMessage(ValueError, "define DB_SSL_CA"):
-            ruta_certificado("/proyecto", None, "  ")
+    def test_base64_se_decodifica_y_se_escribe(self):
+        ruta = ruta_certificado("/p", en_base64=self.b64(self.PEM + "\r\n"))
+        self.assertEqual(self.leer(ruta).replace("\r", ""), self.PEM + "\n")
+
+    def test_base64_acepta_espacios_y_saltos_si_se_pego_partido(self):
+        valor = self.b64(self.PEM)
+        partido = f"  {valor[:10]}\n{valor[10:30]} {valor[30:]}  "
+        self.assertEqual(self.leer(ruta_certificado("/p", en_base64=partido)), self.PEM + "\n")
+
+    def test_prioridad_base64_luego_contenido_luego_ruta(self):
+        otro = self.PEM.replace("MIIabc", "MIIotro")
+        ruta = ruta_certificado("/p", "ca.pem", contenido=otro, en_base64=self.b64(self.PEM))
+        self.assertIn("MIIabc", self.leer(ruta))
+        ruta = ruta_certificado("/p", "ca.pem", contenido=otro, en_base64="   ")  # base64 vacío: sigue
+        self.assertIn("MIIotro", self.leer(ruta))
+
+    def test_base64_invalido_o_que_no_es_pem(self):
+        with self.assertRaisesMessage(ValueError, "DB_SSL_CA_BASE64 no es un base64 válido"):
+            ruta_certificado("/p", en_base64="esto no es base64!!")
+        with self.assertRaisesMessage(ValueError, "DB_SSL_CA_BASE64 no es un base64 válido"):
+            ruta_certificado("/p", en_base64=base64.b64encode(b"\xff\xfe\xfa").decode())  # no es texto
+        with self.assertRaisesMessage(ValueError, "DB_SSL_CA_BASE64 (ya decodificado) no contiene un certificado PEM"):
+            ruta_certificado("/p", en_base64=self.b64("hola mundo"))
+
+    def test_errores_claros_sin_certificado(self):
+        with self.assertRaisesMessage(ValueError, "DB_SSL_CA_CONTENIDO no contiene un certificado PEM"):
+            ruta_certificado("/p", contenido="texto cualquiera")
+        with self.assertRaisesMessage(ValueError, "define DB_SSL_CA_BASE64 o DB_SSL_CA_CONTENIDO"):
+            ruta_certificado("/p", contenido="  ")
