@@ -594,9 +594,9 @@ paths:
   /api/admin/donaciones/:
     get:
       operationId: admin_donaciones_list
-      description: 'Filtros: estado y donante (id). Búsqueda por título o correo del
-        donante. Antes de listar aplica los vencimientos (RN-50) a los registros que
-        estén vencidos.'
+      description: 'Filtros: estado y donante (id). Búsqueda por título, o por correo,
+        nombres, apellidos o nombre del negocio del donante. Antes de listar aplica
+        los vencimientos (RN-50) a los registros que estén vencidos.'
       summary: Listar donaciones
       parameters:
       - in: query
@@ -632,12 +632,13 @@ paths:
         description: Un número de página dentro del conjunto de resultados paginado.
         schema:
           type: integer
-      - name: search
-        required: false
-        in: query
-        description: Un término de búsqueda.
+      - in: query
+        name: search
         schema:
           type: string
+        description: 'Busca por título de la donación, o por correo, nombres, apellidos
+          o nombre del negocio del donante. Varias palabras: cada una debe aparecer
+          en alguno de esos campos (ej. "Ana Rojas").'
       tags:
       - Admin - Donaciones
       security:

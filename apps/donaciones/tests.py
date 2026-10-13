@@ -371,6 +371,31 @@ class AdminDonacionTests(BaseDonacionTest):
         d.refresh_from_db()
         self.assertEqual(d.titulo, "Mercado")
 
+    def test_busqueda_por_nombre_del_donante(self):
+        Usuario.objects.filter(pk=self.donante.pk).update(nombres="Ana María", apellidos="Rojas")
+        Usuario.objects.filter(pk=self.otro_donante.pk).update(
+            nombres="Carlos", apellidos="Pérez", tipo_donante="Negocio", nombre_negocio="Tienda La Esquina",
+            nit="900111222-1",
+        )
+        de_ana = self.crear_en_bd()
+        Donacion.objects.filter(pk=de_ana.pk).update(titulo="Mercado de granos")
+        del_negocio = self.crear_en_bd(donante=self.otro_donante)
+        Donacion.objects.filter(pk=del_negocio.pk).update(titulo="Panes del día")
+
+        def buscar(texto):
+            r = self.cliente_admin.get("/api/admin/donaciones/", {"search": texto})
+            self.assertEqual(r.status_code, 200)
+            return [d["id"] for d in r.data["results"]]
+
+        self.assertEqual(buscar("maría"), [de_ana.pk])  # nombres (sin importar mayúsculas)
+        self.assertEqual(buscar("Rojas"), [de_ana.pk])  # apellidos
+        self.assertEqual(buscar("esquina"), [del_negocio.pk])  # nombre_negocio
+        self.assertEqual(buscar("Ana Rojas"), [de_ana.pk])  # dos palabras en campos distintos
+        self.assertEqual(buscar("Ana Pérez"), [])  # cada palabra debe aparecer: no mezcla donantes
+        self.assertEqual(buscar("Florencia"), [])  # nombre que no existe
+        self.assertEqual(buscar("granos"), [de_ana.pk])  # título, como antes
+        self.assertEqual(buscar("otro@k.com"), [del_negocio.pk])  # correo, como antes
+
     def test_listar_con_filtros_y_detalle_con_fotos(self):
         d = self.crear_en_bd()
         self.crear_en_bd(donante=self.otro_donante, estado="Validada")

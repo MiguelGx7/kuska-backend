@@ -432,3 +432,7 @@ La guía de clics está en [docs/despliegue_railway.md](despliegue_railway.md). 
 - **Un beneficiario Bloqueado o Inactivo no puede responder**, porque `EsUsuarioActivo` lo impide. Si no responde en 48 horas, su entrega queda **Asumida** como cualquier otra.
 - **El dashboard no cambia.** Las entregas Reclamada o Revisada siguen contando como entregadas, porque la solicitud sigue `Entregada`. El reclamo es una alerta para revisar, no anula la entrega.
 - **Pasadas las 48 horas ya no se puede reclamar**, ni siquiera si la confirmación quedó Asumida. El mensaje dice hasta cuándo era el plazo.
+
+## Ajustes posteriores
+
+- **Búsqueda de `admin/donaciones/` por el nombre del donante.** El administrador busca donaciones también por el nombre del donante, porque es como lo recuerda. `?search=` ahora busca en el título, el correo, los nombres, los apellidos y el `nombre_negocio` del donante. Con varias palabras, cada una debe aparecer en alguno de esos campos: "Ana Rojas" encuentra a nombres="Ana María", apellidos="Rojas".

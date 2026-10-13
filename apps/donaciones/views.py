@@ -190,7 +190,18 @@ class DonacionDonanteViewSet(
 @extend_schema_view(
     list=extend_schema(
         summary="Listar donaciones",
-        description="Filtros: estado y donante (id). Búsqueda por título o correo del donante. Antes de listar aplica los vencimientos (RN-50) a los registros que estén vencidos.",
+        description="Filtros: estado y donante (id). Búsqueda por título, o por correo, nombres, apellidos o nombre del negocio del donante. Antes de listar aplica los vencimientos (RN-50) a los registros que estén vencidos.",
+        parameters=[
+            OpenApiParameter(
+                "search",
+                str,
+                description=(
+                    "Busca por título de la donación, o por correo, nombres, apellidos o nombre del "
+                    "negocio del donante. Varias palabras: cada una debe aparecer en alguno de esos "
+                    "campos (ej. \"Ana Rojas\")."
+                ),
+            )
+        ],
     ),
     retrieve=extend_schema(summary="Ver una donación con sus fotos", description="El administrador usa las fotos para validar que es comida en buen estado (RN-11a, RN-13)."),
 )
@@ -199,7 +210,13 @@ class AdminDonacionViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = PERMISOS_ADMIN
     serializer_class = AdminDonacionSerializer
     filterset_class = AdminDonacionFilter
-    search_fields = ["titulo", "donante__correo"]
+    search_fields = [
+        "titulo",
+        "donante__correo",
+        "donante__nombres",
+        "donante__apellidos",
+        "donante__nombre_negocio",
+    ]
     ordering_fields = ["fecha_registro", "estado"]
 
     def get_queryset(self):
