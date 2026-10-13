@@ -6,6 +6,15 @@ Guía paso a paso para publicar el backend de Kumora en [Railway](https://railwa
 - **Fotos:** siguen en **Cloudinary**.
 - **Qué hace Railway:** construye el proyecto desde GitHub y lo corre con gunicorn.
 
+> **Estado actual: desplegado y funcionando.**
+> - **Dominio:** https://kuska-backend-production.up.railway.app
+> - **Base:** `kumora_prod` en Aiven.
+> - **Certificado:** por `DB_SSL_CA_BASE64`.
+> - **Vencimientos:** cron cada hora.
+> - **Administrador de producción:** ya creado.
+>
+> Los pasos de abajo son los que se siguieron. Los tropiezos que hubo están marcados con ⚠ y resumidos en "Lo que aprendimos", al final.
+
 ## Qué ya está preparado en el código
 
 | Archivo | Para qué |
@@ -49,8 +58,8 @@ Las variables se comparten entre el servicio web y el cron, así que conviene cr
 |---|---|
 | `SECRET_KEY` | Una clave nueva, distinta de la de desarrollo. Genérala en tu PC con `python -c "import secrets; print(secrets.token_urlsafe(64))"`. |
 | `DEBUG` | `False` |
-| `ALLOWED_HOSTS` | El dominio de Railway, por ejemplo `kumora-api-production.up.railway.app` (ver el paso 4). |
-| `CSRF_TRUSTED_ORIGINS` | El mismo dominio con `https://`, por ejemplo `https://kumora-api-production.up.railway.app`. |
+| `ALLOWED_HOSTS` | El dominio de Railway, por ejemplo `kuska-backend-production.up.railway.app` (ver el paso 4). |
+| `CSRF_TRUSTED_ORIGINS` | El mismo dominio con `https://`, por ejemplo `https://kuska-backend-production.up.railway.app`. |
 | `CORS_ALLOWED_ORIGINS` | La URL del panel web cuando exista (con `https://`). La app móvil no necesita CORS. |
 | `SWAGGER_PUBLICO` | `True` mientras se desarrollan los frontends; `False` después. |
 | `SECURE_HSTS_SECONDS` | `3600` al principio; `31536000` (1 año) cuando el dominio sea definitivo. |
@@ -77,6 +86,13 @@ Eso deja el base64 copiado en el portapapeles. Pégalo como valor de `DB_SSL_CA_
 
 > No uses `certutil -encode`: agrega encabezados y saltos de línea.
 
+> ⚠ **El `ca.pem` debe ir sin sangría.** Cada línea tiene que empezar en la primera columna. Por ejemplo, la primera debe ser exactamente `-----BEGIN CERTIFICATE-----`, sin espacios ni tabulaciones antes.
+> - **Cómo pasa:** al copiar el certificado desde la consola de Aiven o pegarlo en un editor, a veces queda indentado. La app lo acepta (contiene BEGIN/END), pero la conexión SSL con MySQL falla.
+> - **Cómo revisarlo:**
+>   - abre el `ca.pem` y verifica que ninguna línea empiece con espacios;
+>   - el base64 correcto empieza por `LS0tLS1CRUdJTi`; si empieza por `ICAg` (espacios codificados), el archivo tiene sangría.
+> - **Arreglo:** quita la sangría, guarda y vuelve a generar el base64.
+
 Orden de prioridad del certificado: `DB_SSL_CA_BASE64` → `DB_SSL_CA_CONTENIDO` → `DB_SSL_CA` (ruta, solo en local). Si el base64 está incompleto o no es un certificado, el despliegue falla al arrancar con un mensaje claro en los logs.
 
 > **Correo en el plan Hobby:** Railway bloquea el SMTP saliente (puertos 25, 465, 587 y 2525) en los planes Trial y Hobby. Se habilita en Pro. En esos planes:
@@ -87,7 +103,8 @@ Orden de prioridad del certificado: `DB_SSL_CA_BASE64` → `DB_SSL_CA_CONTENIDO`
 ## 4. Dominio público
 
 1. En el servicio `kumora-api`, ve a **Settings → Networking → Generate Domain**.
-2. Railway da un dominio como `kumora-api-production.up.railway.app`. Si te pide el puerto, deja el que propone: gunicorn escucha en `$PORT`.
+2. Railway da un dominio como `kuska-backend-production.up.railway.app`. Si te pide el puerto, deja el que propone: gunicorn escucha en `$PORT`.
+   ⚠ Usa el **dominio público** (`*.up.railway.app`), no el privado `*.railway.internal`. El privado solo sirve para que los servicios de Railway se hablen entre sí: el navegador, Swagger y las apps no llegan a él. Si se pone en `ALLOWED_HOSTS` o en `CSRF_TRUSTED_ORIGINS`, el sitio responde 400 o falla el CSRF del admin.
 3. Copia ese dominio y actualiza estas variables:
    - `ALLOWED_HOSTS` = el dominio (sin `https://`);
    - `CSRF_TRUSTED_ORIGINS` = `https://` + el dominio.
@@ -130,7 +147,9 @@ Notas:
    - `Listening at: http://0.0.0.0:<puerto>` y `Booting worker` (dos veces, una por worker).
 2. **Swagger:** abre `https://<tu-dominio>/api/docs/` (con `SWAGGER_PUBLICO=True`). Debe cargar con estilos.
 3. **Login:** en Swagger, `POST /api/auth/login/` con el administrador del paso 5 debe responder 200 con `access` y `refresh`. Luego usa **Authorize** con el `access` y prueba `GET /api/admin/configuracion/`.
-4. **Admin de Django:** abre `https://<tu-dominio>/admin/`. Debe verse con estilos (WhiteNoise) y dejarte entrar sin error CSRF. Si aparece "CSRF verification failed", revisa `CSRF_TRUSTED_ORIGINS`.
+4. **Admin de Django:** abre `https://<tu-dominio>/admin/`. Debe verse con estilos (WhiteNoise) y dejarte entrar sin error CSRF. ⚠ Si aparece "CSRF verification failed":
+   - Revisa que `CSRF_TRUSTED_ORIGINS` sea exactamente `https://` + el dominio público, sin `/` al final.
+   - **Prueba en una ventana de incógnito.** El navegador guarda la cookie CSRF de los intentos anteriores (de antes de corregir las variables o de otro dominio), y con esa cookie vieja el error sigue aunque la configuración ya esté bien.
 5. **HTTP → HTTPS:** abre `http://<tu-dominio>/api/docs/`; debe redirigir a `https://`.
 6. **Fotos:** como donante, crea una donación con foto desde Swagger y revisa que aparezca en Cloudinary (`kumora/alimentos/`).
 7. **Cron:** en `kumora-vencimientos` → **Deployments**, después de la siguiente hora en punto debe aparecer una ejecución con el resumen `Vencimientos procesados (...)` y `Errores: 0`.
@@ -144,7 +163,18 @@ Notas:
 | `Falta el certificado de Aiven` | No está definida `DB_SSL_CA_BASE64` en el servicio (o en las variables compartidas). |
 | `DB_SSL_CA_BASE64 no es un base64 válido` o `no contiene un certificado PEM` | El valor se copió incompleto o no salió del `ca.pem`. Vuelve a generarlo con el comando de PowerShell y pégalo completo. |
 | `Can't connect to MySQL server` | El servicio de Aiven está apagado (plan gratis) o los datos de conexión no coinciden. |
-| `Bad Request (400)` en todo | El dominio no está en `ALLOWED_HOSTS`. |
+| `Bad Request (400)` en todo | El dominio no está en `ALLOWED_HOSTS`, o se puso el dominio privado `*.railway.internal` en lugar del público `*.up.railway.app`. |
+| "CSRF verification failed" en `/admin/` | `CSRF_TRUSTED_ORIGINS` no es `https://` + el dominio público, o el navegador tiene una cookie CSRF vieja: probar en una ventana de incógnito. |
+| El certificado se decodifica, pero falla la conexión SSL con MySQL | El `ca.pem` tenía sangría. Quitarla y volver a generar el base64; el correcto empieza por `LS0tLS1CRUdJTi`. |
+| El certificado pegado en `DB_SSL_CA_CONTENIDO` llega dañado | El editor de variables de Railway estropea los textos de varias líneas. Usar `DB_SSL_CA_BASE64`. |
 | Redirecciones infinitas | Falta el encabezado del proxy. No debería pasar en Railway; revisa que `DEBUG=False` venga de las variables y no de otro lado. |
 | `/api/docs/` responde 404 | `SWAGGER_PUBLICO` no está en `True`. |
 | El código de recuperación no llega | SMTP bloqueado en el plan Hobby (ver el paso 3). |
+
+## Lo que aprendimos en el despliegue real
+
+1. **El certificado va en base64.** El editor de variables de Railway borra o daña los valores de varias líneas, así que pegar el PEM en `DB_SSL_CA_CONTENIDO` no funcionó. `DB_SSL_CA_BASE64` es una sola línea y llega intacta.
+2. **El `ca.pem` debe ir sin sangría.** Si sus líneas tienen espacios al inicio, el texto parece un certificado pero la conexión SSL falla. El base64 correcto empieza por `LS0tLS1CRUdJTi`.
+3. **Siempre el dominio público.** `ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS`, el navegador y las apps usan `kuska-backend-production.up.railway.app`, nunca `*.railway.internal` (que es la red privada entre servicios de Railway).
+4. **El CSRF del admin se prueba en incógnito.** Después de corregir `CSRF_TRUSTED_ORIGINS`, una cookie vieja del navegador puede mantener el error; en una ventana de incógnito se ve el resultado real.
+5. **Una base aparte para producción.** `kumora_prod` en el mismo servicio de Aiven: no se mezcla con desarrollo ni con `cargar_demo`. El administrador se creó con `createsuperuser` desde el PC, cambiando un momento `DB_NAME` a `kumora_prod`.

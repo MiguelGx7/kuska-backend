@@ -35,11 +35,30 @@ Autor: Miguel Angel Gomez
 
 ### Conexión a Aiven
 
-- Variables en `.env`: `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`, `DB_SSL_CA` (ruta a `ca.pem` descargado de Aiven), `CLOUDINARY_URL`, `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`, `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `DEFAULT_FROM_EMAIL`.
+- Variables en `.env`: `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`, `DB_SSL_CA` (ruta a `ca.pem` descargado de Aiven), `CLOUDINARY_URL`, `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`, `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `DEFAULT_FROM_EMAIL`. Solo en producción: `DB_SSL_CA_BASE64` (en lugar de `DB_SSL_CA`), `CSRF_TRUSTED_ORIGINS`, `SWAGGER_PUBLICO`, `SECURE_HSTS_SECONDS` y `EMAIL_TIMEOUT` (ver `.env.example`).
 - Correo (recuperación de contraseña): SMTP con `EMAIL_USE_TLS = True`. Con Gmail se usa una **contraseña de aplicación**, nunca la contraseña normal.
 - `OPTIONS: {"ssl": {"ca": DB_SSL_CA}, "charset": "utf8mb4"}`.
 - La base `kumora` se crea en la consola de Aiven (sección Databases del servicio MySQL).
 - El plan gratis de Aiven apaga el servicio por inactividad: si no conecta, encenderlo desde la consola. **Las tablas las crean las migraciones de Django**; el script `docs/kumora_bd.sql` es la referencia del diseño y **no se ejecuta** en Aiven.
+
+### Entornos
+
+Hay dos entornos sobre el **mismo servicio MySQL de Aiven**, cada uno con su propia base de datos.
+
+| | Desarrollo | Producción |
+|---|---|---|
+| Dónde corre | PC local (`python manage.py runserver`) | **Railway**: https://kuska-backend-production.up.railway.app |
+| Base de datos | `kumora` (y `test_kumora`, que crean y borran las pruebas) | `kumora_prod` |
+| Configuración | Archivo `.env` con `DEBUG=True` | Variables del servicio en Railway, con `DEBUG=False` |
+| Certificado de Aiven | `DB_SSL_CA=ca.pem` (archivo local, fuera de git) | `DB_SSL_CA_BASE64` (el `ca.pem` en base64, en una línea) |
+| Servidor | `runserver` | `gunicorn` + `whitenoise`. Arranca con `migrate` → `collectstatic` → `gunicorn` (`railpack.json`) |
+| Swagger | Siempre (`/api/docs/`) | Solo con `SWAGGER_PUBLICO=True` |
+| Vencimientos (RN-50) | A mano: `python manage.py procesar_vencimientos` | Servicio cron de Railway, cada hora (`0 * * * *`) |
+| Datos de demostración | `cargar_demo` (solo con `DEBUG=True`) | No se cargan |
+| Administrador | `createsuperuser` contra `kumora` | Creado con `createsuperuser` desde el PC, apuntando a `kumora_prod` |
+
+- **Nunca** apuntar el `.env` local a `kumora_prod`, salvo para una tarea puntual como crear un administrador, y volver a `kumora` enseguida.
+- La guía de despliegue y los problemas encontrados están en `docs/despliegue_railway.md`.
 
 ---
 
@@ -239,7 +258,7 @@ Idea: un bloqueo **temporal** no desperdicia comida ya comprometida; un bloqueo 
 | Beneficiario | `alimentos-disponibles/` (filtros: categoría, búsqueda, modalidad), `carrito/`, `carrito/enviar/`, `mis-solicitudes/` (filtro por estado), `mis-solicitudes/{id}/cancelar/`, `dashboard/beneficiario/` |
 | Administrador | `admin/donaciones/` (+ `validar/`, `rechazar/`), `admin/solicitudes/` (+ `aprobar/`, `rechazar/`, `entregar/`), `admin/novedades/` (+ `aceptar/`, `rechazar/`), `admin/sanciones/`, `admin/usuarios/` (+ editar correo y teléfono, `cambiar-estado/`, `impacto/`), `admin/categorias/`, `admin/configuracion/`, `dashboard/admin/` |
 | Común | `categorias/` (solo lectura, solo las activas), `notificaciones/`, `notificaciones/{id}/leer/`, `notificaciones/leer-todas/` |
-| Docs | `api/docs/` (Swagger): solo disponible con `DEBUG = True` |
+| Docs | `api/docs/` (Swagger): disponible con `DEBUG = True` o con `SWAGGER_PUBLICO = True` |
 
 Listados con paginación y filtros (`django-filter`).
 

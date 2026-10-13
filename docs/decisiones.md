@@ -319,3 +319,20 @@ La guía de clics está en [docs/despliegue_railway.md](despliegue_railway.md). 
   - repetirlo no tiene efectos dobles (Paso 11).
 - **Base de producción aparte (recomendado).** Se sugiere una base `kumora_prod` en el mismo servicio de Aiven, para no mezclar datos de desarrollo y de demostración. El primer Administrador se crea con `createsuperuser` desde el PC, apuntando a esa base: RN-01 dice que el panel no crea administradores.
 - **Pruebas de este paso.** Se corrieron las de `usuarios` (las 4 del certificado, más el contrato de la API) con `--keepdb`, y `check` y `check --deploy` con variables simuladas. En otra corrida, en la misma app, hubo otro corte de la conexión con Aiven y se repitió.
+
+### Resultado del despliegue
+
+- **Funcionando en Railway:**
+  - **Dominio:** https://kuska-backend-production.up.railway.app.
+  - **Base:** `kumora_prod` en el mismo servicio de Aiven que desarrollo (`kumora`).
+  - **Certificado:** por `DB_SSL_CA_BASE64`.
+  - **Vencimientos:** servicio cron cada hora.
+  - **Administrador de producción:** creado con `createsuperuser` desde el PC.
+
+  CLAUDE.md (sección 2, "Entornos") resume las diferencias entre desarrollo y producción.
+- **Lo que se aprendió**, con el detalle en `docs/despliegue_railway.md`:
+  - **El certificado en base64.** El editor de variables de Railway daña los textos de varias líneas. Por eso se agregó `DB_SSL_CA_BASE64`, y es la forma recomendada.
+  - **El `ca.pem` sin sangría.** Con espacios al inicio de las líneas, el texto pasa la revisión de BEGIN/END pero la conexión SSL falla. Se verifica porque el base64 correcto empieza por `LS0tLS1CRUdJTi`; uno que empieza por `ICAg` delata la sangría.
+  - **El dominio público, no el privado.** `*.railway.internal` es la red privada entre servicios. Con él en `ALLOWED_HOSTS` o en `CSRF_TRUSTED_ORIGINS` el sitio responde 400 o el admin falla por CSRF.
+  - **El CSRF del admin se verifica en incógnito.** Una cookie CSRF guardada de intentos anteriores mantiene el error aunque la configuración ya esté corregida.
+- **Sin cambios de código en este cierre:** solo documentación.
