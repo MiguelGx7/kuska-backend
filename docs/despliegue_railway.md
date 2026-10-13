@@ -44,6 +44,7 @@ Las tablas las crea el propio despliegue, porque el comando de inicio corre `mig
 4. Railway crea un servicio y empieza a construir. **El primer despliegue va a fallar** porque todavía no hay variables; es normal.
 5. Abre el servicio, ve a **Settings** y cambia el nombre a `kumora-api`.
 6. En **Settings → Source**, revisa que la rama sea `master`.
+   ⚠ Revisa también que **Auto deploy** (despliegue automático al hacer push) esté **activo**. Si está apagado, los `git push` llegan a GitHub pero Railway **no los despliega**: sigue corriendo la versión anterior, y cualquier cambio de código (como el del correo con Brevo) parece no funcionar. Haz lo mismo en el servicio del cron.
 7. En **Settings → Build**, revisa que el constructor sea **Railpack**, que es el predeterminado. Si dice Nixpacks, cámbialo a Railpack: `railpack.json` solo lo lee Railpack.
 
 ## 3. Variables de entorno
@@ -176,23 +177,25 @@ Notas:
 
 ## 7. Verificar que funciona
 
-1. **Logs del despliegue** (`kumora-api` → **Deployments** → el último → **View logs**). En orden deben aparecer:
+1. **Que esté corriendo el último commit.** En **Deployments**, el despliegue activo (*Active*) muestra el commit con el que se construyó. Debe ser el último que subiste (compáralo con `git log -1 --oneline`). Si es uno anterior, revisa **Auto deploy** (paso 2) o usa **Deploy latest commit** / **Redeploy**.
+2. **Logs del despliegue** (`kumora-api` → **Deployments** → el último → **View logs**). En orden deben aparecer:
    - las migraciones (`Applying ...` la primera vez, o `No migrations to apply`);
    - `... static files copied`;
    - `Listening at: http://0.0.0.0:<puerto>` y `Booting worker` (dos veces, una por worker).
-2. **Swagger:** abre `https://<tu-dominio>/api/docs/` (con `SWAGGER_PUBLICO=True`). Debe cargar con estilos.
-3. **Login:** en Swagger, `POST /api/auth/login/` con el administrador del paso 5 debe responder 200 con `access` y `refresh`. Luego usa **Authorize** con el `access` y prueba `GET /api/admin/configuracion/`.
-4. **Admin de Django:** abre `https://<tu-dominio>/admin/`. Debe verse con estilos (WhiteNoise) y dejarte entrar sin error CSRF. ⚠ Si aparece "CSRF verification failed":
+3. **Swagger:** abre `https://<tu-dominio>/api/docs/` (con `SWAGGER_PUBLICO=True`). Debe cargar con estilos.
+4. **Login:** en Swagger, `POST /api/auth/login/` con el administrador del paso 5 debe responder 200 con `access` y `refresh`. Luego usa **Authorize** con el `access` y prueba `GET /api/admin/configuracion/`.
+5. **Admin de Django:** abre `https://<tu-dominio>/admin/`. Debe verse con estilos (WhiteNoise) y dejarte entrar sin error CSRF. ⚠ Si aparece "CSRF verification failed":
    - Revisa que `CSRF_TRUSTED_ORIGINS` sea exactamente `https://` + el dominio público, sin `/` al final.
    - **Prueba en una ventana de incógnito.** El navegador guarda la cookie CSRF de los intentos anteriores (de antes de corregir las variables o de otro dominio), y con esa cookie vieja el error sigue aunque la configuración ya esté bien.
-5. **HTTP → HTTPS:** abre `http://<tu-dominio>/api/docs/`; debe redirigir a `https://`.
-6. **Fotos:** como donante, crea una donación con foto desde Swagger y revisa que aparezca en Cloudinary (`kumora/alimentos/`).
-7. **Cron:** en `kumora-vencimientos` → **Deployments**, después de la siguiente hora en punto debe aparecer una ejecución con el resumen `Vencimientos procesados (...)` y `Errores: 0`.
+6. **HTTP → HTTPS:** abre `http://<tu-dominio>/api/docs/`; debe redirigir a `https://`.
+7. **Fotos:** como donante, crea una donación con foto desde Swagger y revisa que aparezca en Cloudinary (`kumora/alimentos/`).
+8. **Cron:** en `kumora-vencimientos` → **Deployments**, después de la siguiente hora en punto debe aparecer una ejecución con el resumen `Vencimientos procesados (...)` y `Errores: 0`.
 
 ## Problemas comunes
 
 | Síntoma | Causa probable |
 |---|---|
+| Un cambio subido con `git push` no se refleja (por ejemplo, el correo con Brevo no sale y Brevo no registra nada) | **Auto deploy** está desactivado y Railway sigue con una versión anterior. Revisa en **Settings → Source** que esté activo, y en **Deployments** que el commit del despliegue activo sea el último. Si no lo es: **Deploy latest commit** / **Redeploy**. |
 | El build falla instalando `mysqlclient` (`pkg-config`, `mysql_config not found`) | El servicio no usa Railpack, así que no leyó `railpack.json`. Revisa **Settings → Build → Builder**. Plan B: cambiar `mysqlclient` por `PyMySQL` (ver `docs/decisiones.md`, Paso 14). |
 | `KeyError: 'SECRET_KEY'` (o `DB_NAME`, `CLOUDINARY_URL`...) | Falta esa variable en el servicio. |
 | `Falta el certificado de Aiven` | No está definida `DB_SSL_CA_BASE64` en el servicio (o en las variables compartidas). |
@@ -213,4 +216,5 @@ Notas:
 2. **El `ca.pem` debe ir sin sangría.** Si sus líneas tienen espacios al inicio, el texto parece un certificado pero la conexión SSL falla. El base64 correcto empieza por `LS0tLS1CRUdJTi`.
 3. **Siempre el dominio público.** `ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS`, el navegador y las apps usan `kuska-backend-production.up.railway.app`, nunca `*.railway.internal` (que es la red privada entre servicios de Railway).
 4. **El CSRF del admin se prueba en incógnito.** Después de corregir `CSRF_TRUSTED_ORIGINS`, una cookie vieja del navegador puede mantener el error; en una ventana de incógnito se ve el resultado real.
-5. **Una base aparte para producción.** `kumora_prod` en el mismo servicio de Aiven: no se mezcla con desarrollo ni con `cargar_demo`. El administrador se creó con `createsuperuser` desde el PC, cambiando un momento `DB_NAME` a `kumora_prod`.
+5. **Auto deploy activo y el último commit desplegado.** El correo con Brevo "no funcionaba" porque Auto deploy estaba desactivado: los push no se desplegaban y seguía corriendo el código anterior, sin anymail. Antes de buscar un error en el código, hay que revisar en **Deployments** que el commit activo sea el último.
+6. **Una base aparte para producción.** `kumora_prod` en el mismo servicio de Aiven: no se mezcla con desarrollo ni con `cargar_demo`. El administrador se creó con `createsuperuser` desde el PC, cambiando un momento `DB_NAME` a `kumora_prod`.
