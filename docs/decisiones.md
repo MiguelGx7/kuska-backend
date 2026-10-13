@@ -436,3 +436,4 @@ La guía de clics está en [docs/despliegue_railway.md](despliegue_railway.md). 
 ## Ajustes posteriores
 
 - **Búsqueda de `admin/donaciones/` por el nombre del donante.** El administrador busca donaciones también por el nombre del donante, porque es como lo recuerda. `?search=` ahora busca en el título, el correo, los nombres, los apellidos y el `nombre_negocio` del donante. Con varias palabras, cada una debe aparecer en alguno de esos campos: "Ana Rojas" encuentra a nombres="Ana María", apellidos="Rojas".
+- **Orígenes de CORS por variable de entorno.** Los orígenes permitidos por CORS van en la variable `CORS_ALLOWED_ORIGINS` y no en el código, porque cambian según el entorno (`http://localhost:5173` en desarrollo, el dominio del panel en producción) y así se cambian en Railway sin tocar código ni redesplegar una versión nueva. No se usa `CORS_ALLOW_ALL_ORIGINS`, para que ningún otro sitio pueda llamar la API desde el navegador.

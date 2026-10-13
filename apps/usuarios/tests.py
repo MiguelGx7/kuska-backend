@@ -1041,3 +1041,34 @@ class MigracionCodigoVerificacionTests(TestCase):
         migracion.completar_correo(registro_apps, None)
         codigo.refresh_from_db()
         self.assertEqual(codigo.correo, "vieja@mail.com")
+
+
+# =====================================================================
+# Ajustes posteriores: CORS para el panel web (React en el navegador)
+# =====================================================================
+@override_settings(CORS_ALLOWED_ORIGINS=["http://localhost:5173"])
+class CorsTests(SimpleTestCase):
+    def preflight(self, origen):
+        """Lo que hace el navegador antes de un GET con el token en Authorization."""
+        return self.client.options(
+            "/api/auth/perfil/",
+            headers={
+                "Origin": origen,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization,content-type",
+            },
+        )
+
+    def test_el_origen_permitido_puede_llamar_con_el_token(self):
+        r = self.preflight("http://localhost:5173")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.headers["Access-Control-Allow-Origin"], "http://localhost:5173")
+        self.assertIn("authorization", r.headers["Access-Control-Allow-Headers"])
+        self.assertIn("GET", r.headers["Access-Control-Allow-Methods"])
+        # Sin cookies (JWT en el encabezado): no se permiten credenciales.
+        self.assertNotIn("Access-Control-Allow-Credentials", r.headers)
+
+    def test_otro_origen_no_recibe_permiso(self):
+        for origen in ("https://sitio-ajeno.com", "http://localhost:3000"):
+            with self.subTest(origen=origen):
+                self.assertNotIn("Access-Control-Allow-Origin", self.preflight(origen).headers)

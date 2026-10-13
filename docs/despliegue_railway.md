@@ -61,7 +61,7 @@ Las variables se comparten entre el servicio web y el cron, así que conviene cr
 | `DEBUG` | `False` |
 | `ALLOWED_HOSTS` | El dominio de Railway, por ejemplo `kuska-backend-production.up.railway.app` (ver el paso 4). |
 | `CSRF_TRUSTED_ORIGINS` | El mismo dominio con `https://`, por ejemplo `https://kuska-backend-production.up.railway.app`. |
-| `CORS_ALLOWED_ORIGINS` | La URL del panel web cuando exista (con `https://`). La app móvil no necesita CORS. |
+| `CORS_ALLOWED_ORIGINS` | Los orígenes del panel web separados por comas, **con** `http://` o `https://`, **sin** barra final ni ruta y sin espacios. Mientras desarrollas el panel en tu PC contra esta API: `http://localhost:5173`. Cuando el panel tenga dominio: `https://<dominio-del-panel>,http://localhost:5173`, y cuando ya no desarrolles en local, quita `localhost`. Un origen mal escrito (por ejemplo, con `/` al final) hace fallar el arranque. La app móvil no necesita CORS: es una restricción solo de los navegadores. |
 | `SWAGGER_PUBLICO` | `True` mientras se desarrollan los frontends; `False` después. |
 | `SECURE_HSTS_SECONDS` | `3600` al principio; `31536000` (1 año) cuando el dominio sea definitivo. |
 | `DB_NAME` | `kumora_prod` (o la base que uses). |
