@@ -12,6 +12,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from config.certificado import ruta_certificado
+from config.correo import elegir_backend
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -76,8 +77,6 @@ AUTH_USER_MODEL = "usuarios.Usuario"
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
-    # Sirve los estáticos (admin y Swagger) sin un servidor aparte.
-    "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -86,6 +85,11 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
+
+# En producción WhiteNoise sirve los estáticos (admin y Swagger) sin un servidor
+# aparte; va justo después de SecurityMiddleware. En local los sirve runserver.
+if not DEBUG:
+    MIDDLEWARE.insert(1, "whitenoise.middleware.WhiteNoiseMiddleware")
 
 ROOT_URLCONF = "config.urls"
 
@@ -180,22 +184,29 @@ CLOUDINARY_STORAGE = {"CLOUDINARY_URL": os.environ["CLOUDINARY_URL"]}
 
 
 # ---------------------------------------------------------------------
-# Correo (SMTP) para recuperar contraseña
+# Correo para recuperar contraseña
 # ---------------------------------------------------------------------
+# Se elige el backend según lo que haya en el entorno:
+# 1. BREVO_API_KEY → Brevo por su API HTTPS (django-anymail). Es lo de producción:
+#    Railway bloquea el SMTP saliente, pero no las peticiones HTTPS.
+# 2. EMAIL_HOST_USER → SMTP (por ejemplo Gmail con contraseña de aplicación).
+# 3. Ninguno → consola: el correo se muestra en la terminal (o en los logs).
+BREVO_API_KEY = os.getenv("BREVO_API_KEY", "").strip()
 EMAIL_HOST = os.getenv("EMAIL_HOST", "")
 EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
 EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
-# Sin usuario SMTP configurado, los correos se muestran en la terminal.
-EMAIL_BACKEND = (
-    "django.core.mail.backends.smtp.EmailBackend"
-    if EMAIL_HOST_USER
-    else "django.core.mail.backends.console.EmailBackend"
-)
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
 EMAIL_USE_TLS = True
 # Si el servidor de correo no responde (ej. SMTP bloqueado por el hosting), se
 # corta a los 10 s en lugar de dejar la petición colgada; el error queda en el log.
 EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
+
+EMAIL_BACKEND = elegir_backend(BREVO_API_KEY, EMAIL_HOST_USER)
+# Credencial de Brevo y el mismo límite de espera que SMTP para su petición HTTPS.
+ANYMAIL = {"BREVO_API_KEY": BREVO_API_KEY, "REQUESTS_TIMEOUT": EMAIL_TIMEOUT}
+
+# Remitente. Con Brevo debe ser una dirección (o dominio) verificada en Brevo,
+# si no, Brevo rechaza el envío. Formato: Kumora <correo@dominio.com>
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER)
 
 

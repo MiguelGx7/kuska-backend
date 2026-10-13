@@ -5,12 +5,14 @@ Corren sobre una base temporal (test_<DB_NAME>) que Django crea y borra.
 """
 
 import base64
+import json
 import re
 import tempfile
 from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
+import requests
 from django.core import mail
 from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase, override_settings
@@ -20,10 +22,11 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.sanciones.models import Sancion
 from config.certificado import ruta_certificado
+from config.correo import elegir_backend
 
 from .models import RecuperacionContrasena, Rol, Usuario
 from .permissions import EsAdministrador, EsBeneficiario, EsDonante
-from .services import MENSAJE_CODIGO_INVALIDO
+from .services import MENSAJE_CODIGO_INVALIDO, MENSAJE_RECUPERACION
 
 CLAVE = "Kumora.2026x"
 CLAVE_NUEVA = "Otra.Clave2026"
@@ -671,3 +674,90 @@ class CertificadoAivenTests(SimpleTestCase):
             ruta_certificado("/p", contenido="texto cualquiera")
         with self.assertRaisesMessage(ValueError, "define DB_SSL_CA_BASE64 o DB_SSL_CA_CONTENIDO"):
             ruta_certificado("/p", contenido="  ")
+
+
+# =====================================================================
+# Paso 15: correo de recuperación (locmem en pruebas, Brevo en producción)
+# =====================================================================
+REMITENTE = "Kumora <no-responder@kumora.test>"
+BREVO_FALSO = {
+    "EMAIL_BACKEND": "anymail.backends.brevo.EmailBackend",
+    "ANYMAIL": {"BREVO_API_KEY": "clave-falsa", "REQUESTS_TIMEOUT": 10},
+    "DEFAULT_FROM_EMAIL": REMITENTE,
+}
+
+
+def respuesta_brevo(estado, cuerpo):
+    """Respuesta HTTP simulada de la API de Brevo (no sale nada a internet)."""
+    respuesta = requests.Response()
+    respuesta.status_code = estado
+    respuesta._content = json.dumps(cuerpo).encode()
+    respuesta.headers["Content-Type"] = "application/json"
+    return respuesta
+
+
+@override_settings(DEFAULT_FROM_EMAIL=REMITENTE)
+class CorreoRecuperacionTests(BaseAPITest):
+    url = "/api/auth/recuperar/solicitar/"
+
+    def setUp(self):
+        super().setUp()
+        self.usuario = crear_usuario("dona@mail.com", Rol.DONANTE, "10", tipo_donante="Persona")
+
+    def test_asunto_y_texto_claros_en_espanol(self):
+        # En las pruebas Django usa el backend en memoria (locmem): mail.outbox.
+        r = self.post(self.url, {"correo": "dona@mail.com"})
+        self.assertEqual(r.data, {"mensaje": MENSAJE_RECUPERACION})
+        self.assertEqual(len(mail.outbox), 1)
+        correo = mail.outbox[0]
+        self.assertEqual(correo.subject, "Kumora: código para recuperar tu contraseña")
+        self.assertEqual(correo.to, ["dona@mail.com"])
+        self.assertEqual(correo.from_email, REMITENTE)
+        self.assertIn("Hola, dona.", correo.body)
+        self.assertRegex(correo.body, r"Tu código para recuperar la contraseña es: \d{6}\n")
+        self.assertIn("Vence en 15 minutos.", correo.body)
+        self.assertIn("Si no lo pediste, ignora este correo.", correo.body)
+
+    @override_settings(**BREVO_FALSO)
+    def test_con_brevo_se_envia_por_su_api_https(self):
+        with mock.patch(
+            "requests.Session.request", return_value=respuesta_brevo(201, {"messageId": "<abc@smtp-relay.brevo.com>"})
+        ) as peticion:
+            r = self.post(self.url, {"correo": "dona@mail.com"})
+        self.assertEqual(r.data, {"mensaje": MENSAJE_RECUPERACION})
+        peticion.assert_called_once()
+        metodo, url = peticion.call_args.kwargs["method"], peticion.call_args.kwargs["url"]
+        datos = json.loads(peticion.call_args.kwargs["data"])
+        self.assertEqual((metodo.upper(), url), ("POST", "https://api.brevo.com/v3/smtp/email"))
+        self.assertEqual(peticion.call_args.kwargs["headers"]["api-key"], "clave-falsa")
+        self.assertEqual(peticion.call_args.kwargs["timeout"], 10)
+        self.assertEqual(datos["sender"], {"email": "no-responder@kumora.test", "name": "Kumora"})
+        self.assertEqual(datos["to"], [{"email": "dona@mail.com"}])
+        self.assertEqual(datos["subject"], "Kumora: código para recuperar tu contraseña")
+        self.assertIn("Vence en 15 minutos.", datos["textContent"])
+
+    @override_settings(**BREVO_FALSO)
+    def test_si_brevo_falla_la_respuesta_es_la_misma_y_queda_en_el_log(self):
+        fallas = [
+            requests.ConnectionError("sin conexión con Brevo"),
+            respuesta_brevo(401, {"code": "unauthorized", "message": "Key not found"}),
+        ]
+        for falla in fallas:
+            with self.subTest(falla=type(falla).__name__):
+                efecto = {"side_effect": falla} if isinstance(falla, Exception) else {"return_value": falla}
+                with mock.patch("requests.Session.request", **efecto), \
+                        self.assertLogs("apps.usuarios.services", level="ERROR") as log:
+                    r = self.post(self.url, {"correo": "dona@mail.com"})
+                # RN-04b: misma respuesta; el fallo solo queda en el log.
+                self.assertEqual((r.status_code, r.data), (200, {"mensaje": MENSAJE_RECUPERACION}))
+                self.assertIn("No se pudo enviar el código de recuperación a dona@mail.com", log.output[0])
+        # El código sí se generó (el usuario puede pedir otro cuando el correo funcione).
+        self.assertEqual(RecuperacionContrasena.objects.filter(usuario=self.usuario).count(), 2)
+
+
+class ElegirBackendCorreoTests(SimpleTestCase):
+    def test_prioridad_brevo_luego_smtp_luego_consola(self):
+        self.assertEqual(elegir_backend("xkeysib-123", "yo@gmail.com"), "anymail.backends.brevo.EmailBackend")
+        self.assertEqual(elegir_backend("", "yo@gmail.com"), "django.core.mail.backends.smtp.EmailBackend")
+        self.assertEqual(elegir_backend("  ", ""), "django.core.mail.backends.console.EmailBackend")
+        self.assertEqual(elegir_backend(None, None), "django.core.mail.backends.console.EmailBackend")

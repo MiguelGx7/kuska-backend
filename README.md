@@ -24,14 +24,14 @@ Las reglas de negocio (RN-01 a RN-77) están en [CLAUDE.md](CLAUDE.md), y las de
 - Fotos en **Cloudinary** (`django-cloudinary-storage`), validadas con Pillow.
 - `django-filter`, `django-cors-headers`, `python-dotenv`.
 - `drf-spectacular` para la documentación Swagger / OpenAPI.
-- Producción: `gunicorn` (servidor) y `whitenoise` (estáticos), desplegado en **Railway**.
+- Producción: `gunicorn` (servidor) y `whitenoise` (estáticos), desplegado en **Railway**. Correo por la API de **Brevo** con `django-anymail`.
 
 ## Requisitos
 
 - Windows 10/11 con **Python 3.14** (marca "Add Python to PATH" al instalarlo).
 - Un servicio **MySQL en Aiven** con una base llamada `kumora` (se crea en la consola de Aiven, sección *Databases*) y su certificado `ca.pem`.
 - Una cuenta de **Cloudinary**, para las fotos.
-- Opcional: una cuenta de Gmail con **contraseña de aplicación**, para enviar los códigos de recuperación. Sin ella, los correos se muestran en la consola.
+- Opcional: una cuenta de **Brevo** (producción) o de Gmail con **contraseña de aplicación** (SMTP), para enviar los códigos de recuperación. Sin ninguna, los correos se muestran en la consola.
 
 ## Instalación en Windows
 
@@ -65,7 +65,8 @@ El archivo `.env` está en `.gitignore`: **nunca se sube** al repositorio. La pl
 | `DB_SSL_CA_BASE64` | Solo en Railway (recomendado): el `ca.pem` en base64, en una línea. Prioridad: `DB_SSL_CA_BASE64` > `DB_SSL_CA_CONTENIDO` > `DB_SSL_CA`. Ver [docs/despliegue_railway.md](docs/despliegue_railway.md). |
 | `DB_SSL_CA_CONTENIDO` | Alternativa: el texto completo del `ca.pem`. El editor de Railway daña los textos de varias líneas, por eso se recomienda el base64. |
 | `CLOUDINARY_URL` | `cloudinary://<api_key>:<api_secret>@<cloud_name>` |
-| `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `DEFAULT_FROM_EMAIL` | Correo SMTP con TLS. Con Gmail se usa una contraseña de aplicación. Si `EMAIL_HOST_USER` está vacío, los correos salen por consola. `EMAIL_TIMEOUT` (10 s) evita esperas largas. |
+| `BREVO_API_KEY`, `DEFAULT_FROM_EMAIL` | Correo de producción por la API HTTPS de Brevo (Railway bloquea SMTP). `DEFAULT_FROM_EMAIL` es el remitente verificado en Brevo. En local `BREVO_API_KEY` se deja vacía. |
+| `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD` | Correo SMTP con TLS, si no hay `BREVO_API_KEY`. Con Gmail se usa una contraseña de aplicación. Si tampoco hay `EMAIL_HOST_USER`, los correos salen por consola. `EMAIL_TIMEOUT` (10 s) evita esperas largas. |
 | `CSRF_TRUSTED_ORIGINS`, `SWAGGER_PUBLICO`, `SECURE_HSTS_SECONDS` | Solo producción (`DEBUG=False`): el dominio HTTPS para el admin, si se muestra Swagger y la duración de HSTS. En local se dejan vacías. |
 
 ## Correr el servidor

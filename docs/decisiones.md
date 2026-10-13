@@ -336,3 +336,28 @@ La guía de clics está en [docs/despliegue_railway.md](despliegue_railway.md). 
   - **El dominio público, no el privado.** `*.railway.internal` es la red privada entre servicios. Con él en `ALLOWED_HOSTS` o en `CSRF_TRUSTED_ORIGINS` el sitio responde 400 o el admin falla por CSRF.
   - **El CSRF del admin se verifica en incógnito.** Una cookie CSRF guardada de intentos anteriores mantiene el error aunque la configuración ya esté corregida.
 - **Sin cambios de código en este cierre:** solo documentación.
+
+## Paso 15 — Correo real en producción (Brevo)
+
+- **Por qué Brevo y por qué por API.** Railway bloquea el SMTP saliente en los planes Trial y Hobby, así que el correo de recuperación no salía en producción. Una API de correo por **HTTPS** no está bloqueada. Se eligió **Brevo**, que tiene plan gratis (unos 300 correos al día), y se usa con **`django-anymail`** 15.2.
+- **Por qué anymail.** Es un backend de correo de Django. `send_mail()` sigue siendo la misma función: solo cambia `EMAIL_BACKEND`. Por eso **el código que envía el correo no cambió**. Si mañana se cambia de proveedor, solo se cambia la configuración.
+- **Elección del backend** (`config/correo.py`, `elegir_backend()`):
+  1. con `BREVO_API_KEY` → Brevo;
+  2. si no, con `EMAIL_HOST_USER` → SMTP, como antes;
+  3. si no → consola.
+
+  El desarrollo local no cambia: sin `BREVO_API_KEY` sigue como estaba. Está en una función aparte para probarla sin recargar los settings, como `config/certificado.py`.
+- **El remitente sale del entorno.** `DEFAULT_FROM_EMAIL` debe ser un remitente **verificado en Brevo**, porque Brevo rechaza los envíos desde direcciones no verificadas. Se escribe con nombre: `Kumora <correo>`.
+- **El mismo tiempo límite.** `ANYMAIL["REQUESTS_TIMEOUT"]` usa `EMAIL_TIMEOUT` (10 s); anymail trae 30 s por defecto. Si Brevo no responde, la petición no se queda colgada.
+- **Si el envío falla, nada cambia para el usuario (RN-04b).** `_enviar_codigo()` ya capturaba cualquier error: la respuesta sigue siendo "Si el correo está registrado, te enviamos un código" y el error queda en el log. Así no se revela si el correo existe ni si hubo un problema. El código sí se guarda, y el usuario puede pedir otro.
+- **El correo se revisó y no hubo que cambiarlo:**
+  - asunto: "Kumora: código para recuperar tu contraseña";
+  - cuerpo: saludo con el nombre, "Tu código para recuperar la contraseña es: NNNNNN", "Vence en 15 minutos.", "Si no lo pediste, ignora este correo." y la firma.
+- **Pruebas sin internet.**
+  - El contenido se prueba con el backend en memoria (locmem), que Django usa en las pruebas.
+  - El envío por Brevo se prueba simulando su API (`requests.Session.request`). Se verifica que va a `https://api.brevo.com/v3/smtp/email` con la `api-key`, el remitente, el destinatario, el asunto, el texto y el tiempo límite de 10 s.
+  - Se simulan dos fallos (sin conexión, y una API key inválida con 401). En los dos la respuesta es la misma y el error queda en el log.
+  - La elección del backend se prueba aparte. Son 4 pruebas nuevas en `usuarios`, y la app completa pasa (71).
+- **No se agregó `anymail` a `INSTALLED_APPS`.** Solo hace falta para recibir *webhooks* de seguimiento, que Kumora no usa; para enviar basta el backend.
+- **Ajuste de paso: WhiteNoise solo en producción.** Desde el Paso 14, su middleware estaba siempre activo y en desarrollo y en las pruebas avisaba `No directory at: ...staticfiles`, porque en local no se corre `collectstatic`. Ahora se agrega solo con `DEBUG=False`, como el resto de lo de producción; en local los estáticos los sirve `runserver`. `check --deploy` en producción simulada sigue sin advertencias.
+- **Pendiente para un uso real:** un dominio propio autenticado en Brevo. Con un remitente `@gmail.com` los correos pueden llegar a spam.

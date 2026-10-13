@@ -67,8 +67,11 @@ Las variables se comparten entre el servicio web y el cron, así que conviene cr
 | `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT` | Los de tu servicio en Aiven (**Overview → Connection information**). |
 | `DB_SSL_CA_BASE64` | Tu `ca.pem` codificado en **base64, en una sola línea**. Mira cómo generarlo justo debajo de esta tabla. |
 | `CLOUDINARY_URL` | `cloudinary://<api_key>:<api_secret>@<cloud_name>` |
-| `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `DEFAULT_FROM_EMAIL` | Los del correo (ver la nota de abajo). |
+| `BREVO_API_KEY` | La API key v3 de Brevo (empieza por `xkeysib-`). Ver "Correo con Brevo", más abajo. |
+| `DEFAULT_FROM_EMAIL` | El remitente **verificado** en Brevo, por ejemplo `Kumora <tu-correo@gmail.com>`. |
 | `EMAIL_TIMEOUT` | `10` |
+
+Las variables de SMTP (`EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`) **no se usan en Railway**: con `BREVO_API_KEY` el correo sale por la API de Brevo.
 
 No definas `DB_SSL_CA` ni `DB_SSL_CA_CONTENIDO` en Railway: con `DB_SSL_CA_BASE64` basta. `PORT` lo pone Railway solo; no lo agregues.
 
@@ -95,10 +98,32 @@ Eso deja el base64 copiado en el portapapeles. Pégalo como valor de `DB_SSL_CA_
 
 Orden de prioridad del certificado: `DB_SSL_CA_BASE64` → `DB_SSL_CA_CONTENIDO` → `DB_SSL_CA` (ruta, solo en local). Si el base64 está incompleto o no es un certificado, el despliegue falla al arrancar con un mensaje claro en los logs.
 
-> **Correo en el plan Hobby:** Railway bloquea el SMTP saliente (puertos 25, 465, 587 y 2525) en los planes Trial y Hobby. Se habilita en Pro. En esos planes:
-> - el correo con el código de recuperación **no saldrá**. La API no se queda colgada (se corta a los `EMAIL_TIMEOUT` segundos) y sigue respondiendo el mensaje de siempre, pero el usuario no recibe el código.
-> - Para la sustentación puedes dejar `EMAIL_HOST_USER` vacío: el código aparece en los **logs** del servicio (**Deployments → View logs**).
-> - Para un uso real hay dos caminos: el plan Pro, o un servicio de correo por HTTPS. Ese cambio no está hecho.
+### Correo con Brevo
+
+Railway bloquea el SMTP saliente (puertos 25, 465, 587 y 2525) en los planes Trial y Hobby. Por eso, en producción, el correo de recuperación sale por la **API HTTPS de Brevo** (con `django-anymail`), que Railway no bloquea. El backend elige solo el canal: si hay `BREVO_API_KEY` usa Brevo; si no, SMTP; si tampoco, la consola.
+
+1. **Crear la cuenta:** regístrate gratis en [brevo.com](https://www.brevo.com). El plan gratis permite unos 300 correos al día, de sobra para Kumora.
+2. **Verificar el remitente:**
+   - Ve a **Senders, Domains & Dedicated IPs → Senders → Add a sender**.
+   - Pon el nombre (`Kumora`) y el correo desde el que saldrán los mensajes, por ejemplo tu Gmail.
+   - Brevo envía un código o enlace a ese correo; confírmalo.
+   - Solo se puede enviar desde remitentes verificados. Ese mismo correo va en `DEFAULT_FROM_EMAIL`: `Kumora <tu-correo@gmail.com>`.
+3. **Crear la API key:**
+   - En **SMTP & API → API Keys → Generate a new API key**, ponle un nombre (`kumora-railway`) y cópiala: Brevo **la muestra una sola vez**.
+   - Debe ser una **API key v3** (empieza por `xkeysib-`), **no** la "SMTP key" de la pestaña SMTP.
+4. **IPs autorizadas:**
+   - Brevo puede bloquear las llamadas desde IPs que no conoce, y la IP de salida de Railway cambia.
+   - En **Settings → Security → Authorised IPs**, elige que no se revisen las IPs desconocidas, o aprueba la que aparezca.
+   - Si no, el envío falla con `unauthorized: IP not authorized` o `not verified`.
+5. **Cargar las variables en Railway:** `BREVO_API_KEY` y `DEFAULT_FROM_EMAIL` (en las variables compartidas, paso 3). Railway redespliega solo.
+6. **Probar:**
+   - En Swagger, `POST /api/auth/recuperar/solicitar/` con el correo de un usuario real de producción.
+   - Debe llegar "Kumora: código para recuperar tu contraseña", con el código de 6 dígitos y "Vence en 15 minutos".
+   - En Brevo, **Transactional → Logs** muestra el envío.
+
+Si el envío falla, la API responde igual que siempre ("Si el correo está registrado…", RN-04b) y el error queda en los logs del servicio: `No se pudo enviar el código de recuperación a ...`.
+
+> Un remitente `@gmail.com` enviado por Brevo puede llegar a la carpeta de spam, porque el dominio gmail.com no autoriza a Brevo. Para la sustentación basta; para un uso real conviene un dominio propio autenticado en Brevo (registros DNS).
 
 ## 4. Dominio público
 
@@ -169,7 +194,8 @@ Notas:
 | El certificado pegado en `DB_SSL_CA_CONTENIDO` llega dañado | El editor de variables de Railway estropea los textos de varias líneas. Usar `DB_SSL_CA_BASE64`. |
 | Redirecciones infinitas | Falta el encabezado del proxy. No debería pasar en Railway; revisa que `DEBUG=False` venga de las variables y no de otro lado. |
 | `/api/docs/` responde 404 | `SWAGGER_PUBLICO` no está en `True`. |
-| El código de recuperación no llega | SMTP bloqueado en el plan Hobby (ver el paso 3). |
+| El código de recuperación no llega y en los logs dice `No se pudo enviar el código` | Mira el detalle del error en el log:<br>• `unauthorized` / `Key not found`: la API key está mal o es una "SMTP key".<br>• `IP not authorized` / `not verified`: hay que autorizar la IP en Brevo.<br>• `sender is not valid`: `DEFAULT_FROM_EMAIL` no es un remitente verificado. |
+| El código de recuperación no llega y no hay error en los logs | Revisa la carpeta de spam y **Transactional → Logs** en Brevo. Si no hay `BREVO_API_KEY`, el correo salió por consola: búscalo en los logs del servicio. |
 
 ## Lo que aprendimos en el despliegue real
 
