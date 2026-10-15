@@ -12,6 +12,8 @@ Guía paso a paso para publicar el backend de Kumora en [Railway](https://railwa
 > - **Certificado:** por `DB_SSL_CA_BASE64`.
 > - **Vencimientos:** cron cada hora.
 > - **Administrador de producción:** ya creado.
+> - **Panel web (React):** publicado en Vercel, https://kumora-admin.vercel.app (ver el paso 8).
+> - **CORS:** `CORS_ALLOWED_ORIGINS=https://kumora-admin.vercel.app,http://localhost:5173`.
 >
 > Los pasos de abajo son los que se siguieron. Los tropiezos que hubo están marcados con ⚠ y resumidos en "Lo que aprendimos", al final.
 
@@ -191,6 +193,25 @@ Notas:
 7. **Fotos:** como donante, crea una donación con foto desde Swagger y revisa que aparezca en Cloudinary (`kumora/alimentos/`).
 8. **Cron:** en `kumora-vencimientos` → **Deployments**, después de la siguiente hora en punto debe aparecer una ejecución con el resumen `Vencimientos procesados (...)` y `Errores: 0`.
 
+## 8. Panel web del Administrador en Vercel
+
+El panel (repositorio `kuska-frontend`, React + Vite) es un sitio estático: `npm run build` genera la carpeta `dist` y Vercel solo la entrega. No necesita servidor, así que no gasta el crédito de Railway.
+
+1. **`vercel.json`** en la raíz del frontend, para que las rutas de React Router (por ejemplo `/donaciones/5`) funcionen al recargar:
+   ```json
+   { "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }] }
+   ```
+2. En [vercel.com](https://vercel.com), con la cuenta de GitHub: **Add New → Project → kuska-frontend**.
+   - **Project Name:** `kumora-admin` (define la URL).
+   - **Framework:** Vite. **Build:** `npm run build`. **Output:** `dist`.
+   - **Environment Variables:** `VITE_API_URL` = `https://kuska-backend-production.up.railway.app/api` (en todos los entornos).
+3. **Deploy.** El dominio fijo de producción es `https://kumora-admin.vercel.app`.
+   ⚠ No confundirlo con la URL de cada despliegue (`kumora-admin-<código>-kumora.vercel.app`), que cambia con cada push.
+4. En Railway, solo en el servicio principal (el cron no recibe peticiones del navegador): `CORS_ALLOWED_ORIGINS` = `https://kumora-admin.vercel.app,http://localhost:5173`. Sin `/` al final ni espacios.
+5. **Probar:** iniciar sesión en el panel publicado, navegar y recargar en `/donaciones` (no debe dar 404).
+
+Cada `git push` a `main` del frontend vuelve a desplegar el panel solo.
+
 ## Problemas comunes
 
 | Síntoma | Causa probable |
@@ -206,6 +227,8 @@ Notas:
 | El certificado se decodifica, pero falla la conexión SSL con MySQL | El `ca.pem` tenía sangría. Quitarla y volver a generar el base64; el correcto empieza por `LS0tLS1CRUdJTi`. |
 | El certificado pegado en `DB_SSL_CA_CONTENIDO` llega dañado | El editor de variables de Railway estropea los textos de varias líneas. Usar `DB_SSL_CA_BASE64`. |
 | Redirecciones infinitas | Falta el encabezado del proxy. No debería pasar en Railway; revisa que `DEBUG=False` venga de las variables y no de otro lado. |
+| El panel publicado dice "No pudimos conectar" al iniciar sesión, y la consola del navegador menciona CORS | El dominio del panel no está en `CORS_ALLOWED_ORIGINS` del servicio principal, o se puso con `/` al final o la URL de un despliegue en vez del dominio fijo. |
+| En el panel publicado, recargar en una ruta como `/donaciones` da 404 | Falta `vercel.json` en la raíz del frontend. |
 | `/api/docs/` responde 404 | `SWAGGER_PUBLICO` no está en `True`. |
 | El código de recuperación no llega y en los logs dice `No se pudo enviar el código` | Mira el detalle del error en el log:<br>• `unauthorized` / `Key not found`: la API key está mal o es una "SMTP key".<br>• `IP not authorized` / `not verified`: hay que autorizar la IP en Brevo.<br>• `sender is not valid`: `DEFAULT_FROM_EMAIL` no es un remitente verificado. |
 | El código de recuperación no llega y no hay error en los logs | Revisa la carpeta de spam y **Transactional → Logs** en Brevo. Si no hay `BREVO_API_KEY`, el correo salió por consola: búscalo en los logs del servicio. |
