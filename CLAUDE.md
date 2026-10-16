@@ -258,6 +258,7 @@ Idea: un bloqueo **temporal** no desperdicia comida ya comprometida; un bloqueo 
 - Permiso base `EsUsuarioActivo` en todas las rutas protegidas: en **cada petición** se revisa `estado`; si no está `Activo` se rechaza aunque el token sea válido (un bloqueo o una inactivación aplican de inmediato). Si está `Bloqueado` con `bloqueado_hasta` vencido, se desbloquea como en RN-03.
 - Cada usuario solo accede a **sus propios** datos (donaciones, solicitudes, carrito, notificaciones), salvo el administrador.
 - Contraseñas con el hash de Django. Nunca devolver la contraseña.
+- Reglas de contraseña (validadores por defecto de Django en `AUTH_PASSWORD_VALIDATORS`): mínimo 8 caracteres, no solo números, no una contraseña común y no parecida a los datos del usuario. Se aplican en el registro, el cambio y la recuperación de contraseña. Los frontends no las repiten: muestran el mensaje del servidor.
 - Tokens: access de **30 minutos**; refresh de **7 días** con rotación (`ROTATE_REFRESH_TOKENS`) y lista negra (`BLACKLIST_AFTER_ROTATION`). Al cambiar o recuperar la contraseña, y al bloquear o inactivar a un usuario, se invalidan todos sus refresh tokens.
 - Límite de peticiones (throttling de DRF, sin tablas): login, registro y recuperar contraseña, **5 por minuto por IP**.
 
